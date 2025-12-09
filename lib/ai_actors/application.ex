@@ -12,6 +12,7 @@ defmodule AiActors.Application do
     children = [
       # Core services
       AiActors.CodeModifier,
+      AiActors.EscalationTracker,
 
       # Dynamic supervisor for AiActors
       {DynamicSupervisor, strategy: :one_for_one, name: AiActors.ActorSupervisor}

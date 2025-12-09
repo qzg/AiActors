@@ -86,7 +86,18 @@ defmodule AiActors.AiActor do
   @callback execute_tool(tool_name :: String.t(), input :: map(), state :: term()) ::
               {:ok, result :: term(), new_state :: term()} | {:error, reason :: term()}
 
-  @optional_callbacks development_metadata: 0, available_tools: 0, execute_tool: 3
+  @doc """
+  Whether this actor should enable self-learning capabilities.
+  """
+  @callback enable_self_learning?() :: boolean()
+
+  @doc """
+  Configuration for self-learning behavior.
+  """
+  @callback self_learning_config() :: map()
+
+  @optional_callbacks development_metadata: 0, available_tools: 0, execute_tool: 3,
+                      enable_self_learning?: 0, self_learning_config: 0
 
   defmacro __using__(_opts) do
     quote do
@@ -118,7 +129,14 @@ defmodule AiActors.AiActor do
         AiActors.AiActor.execute_default_tool(tool_name, input, state, __MODULE__)
       end
 
-      defoverridable development_metadata: 0, available_tools: 0, execute_tool: 3
+      @impl AiActors.AiActor
+      def enable_self_learning?, do: false
+
+      @impl AiActors.AiActor
+      def self_learning_config, do: %{}
+
+      defoverridable development_metadata: 0, available_tools: 0, execute_tool: 3,
+                     enable_self_learning?: 0, self_learning_config: 0
 
       # Wrap init to add AiActor extensions
       def start_link(args, opts \\ []) do
@@ -146,6 +164,20 @@ defmodule AiActors.AiActor do
         GenServer.call(server, :__ai_actor_get_metadata__)
       end
 
+      @doc """
+      Trigger a self-learning review for this actor.
+      """
+      def trigger_review(server) do
+        GenServer.call(server, :__ai_actor_trigger_review__, 60_000)
+      end
+
+      @doc """
+      Get learning statistics for this actor.
+      """
+      def get_learning_stats(server) do
+        GenServer.call(server, :__ai_actor_learning_stats__)
+      end
+
       # Internal GenServer implementation with AiActor extensions
 
       @doc false
@@ -158,8 +190,25 @@ defmodule AiActors.AiActor do
               development_metadata: development_metadata(),
               conversation_history: [],
               available_tools: available_tools(),
-              pending_modifications: %{}
+              pending_modifications: %{},
+              self_learning_timer: nil
             }
+
+            # Start self-learning if enabled
+            ai_state =
+              if enable_self_learning?() do
+                case AiActors.SelfLearning.start_learning(self(), __MODULE__) do
+                  {:ok, timer_ref} ->
+                    Logger.info("Self-learning enabled for #{inspect(__MODULE__)}")
+                    %{ai_state | self_learning_timer: timer_ref}
+
+                  {:error, reason} ->
+                    Logger.warning("Failed to start self-learning: #{inspect(reason)}")
+                    ai_state
+                end
+              else
+                ai_state
+              end
 
             {:ok, ai_state}
 
@@ -190,6 +239,19 @@ defmodule AiActors.AiActor do
       @doc false
       def handle_call(:__ai_actor_get_metadata__, _from, state) do
         {:reply, state.development_metadata, state}
+      end
+
+      @doc false
+      def handle_call(:__ai_actor_trigger_review__, _from, state) do
+        result = AiActors.SelfLearning.perform_review(__MODULE__)
+        {:reply, result, state}
+      end
+
+      @doc false
+      def handle_call(:__ai_actor_learning_stats__, _from, state) do
+        stats = AiActors.EscalationTracker.get_statistics(__MODULE__)
+        report = AiActors.SelfLearning.generate_report(__MODULE__)
+        {:reply, %{statistics: stats, report: report}, state}
       end
 
       # Intercept handle_call to provide LLM escalation
@@ -272,6 +334,29 @@ defmodule AiActors.AiActor do
                 Logger.error("Code modification failed: #{inspect(reason)}")
                 {:noreply, %{state | pending_modifications: new_pending}}
             end
+        end
+      end
+
+      @doc false
+      def handle_info({:self_learning_review, actor_module}, state) do
+        # Perform periodic self-learning review
+        Logger.info("Performing scheduled self-learning review for #{inspect(actor_module)}")
+
+        Task.start(fn ->
+          AiActors.SelfLearning.perform_review(actor_module)
+        end)
+
+        # Reschedule next review
+        if enable_self_learning?() do
+          case AiActors.SelfLearning.start_learning(self(), __MODULE__) do
+            {:ok, timer_ref} ->
+              {:noreply, %{state | self_learning_timer: timer_ref}}
+
+            {:error, _reason} ->
+              {:noreply, state}
+          end
+        else
+          {:noreply, state}
         end
       end
 
@@ -510,6 +595,8 @@ defmodule AiActors.AiActor do
     # Query LLM asynchronously if this is a call
     if message_type == :call and from do
       Task.start(fn ->
+        start_time = System.monotonic_time(:millisecond)
+
         result =
           AiActors.LLMClient.send_message(
             [%{role: "user", content: prompt}],
@@ -525,15 +612,51 @@ defmodule AiActors.AiActor do
             }
           )
 
+        end_time = System.monotonic_time(:millisecond)
+        execution_time = end_time - start_time
+
         response =
           case result do
             {:ok, llm_response} ->
               case AiActors.LLMClient.parse_structured_response(llm_response) do
-                {:ok, parsed} -> {:ok, parsed}
-                _ -> {:error, :invalid_llm_response}
+                {:ok, parsed} ->
+                  # Log successful escalation
+                  AiActors.EscalationTracker.log_escalation(
+                    module,
+                    self(),
+                    message,
+                    message_type,
+                    parsed,
+                    execution_time
+                  )
+
+                  {:ok, parsed}
+
+                error ->
+                  # Log failed escalation
+                  AiActors.EscalationTracker.log_escalation(
+                    module,
+                    self(),
+                    message,
+                    message_type,
+                    {:error, :invalid_llm_response},
+                    execution_time
+                  )
+
+                  {:error, :invalid_llm_response}
               end
 
             error ->
+              # Log error
+              AiActors.EscalationTracker.log_escalation(
+                module,
+                self(),
+                message,
+                message_type,
+                error,
+                execution_time
+              )
+
               error
           end
 
