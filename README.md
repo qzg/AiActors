@@ -15,31 +15,43 @@ AiActors extends the OTP GenServer pattern with AI capabilities, enabling actors
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    Your Application                      │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐ │
-│  │  AiActor A   │  │  AiActor B   │  │  AiActor C   │ │
-│  │              │  │              │  │              │ │
-│  │ • State      │  │ • State      │  │ • State      │ │
-│  │ • Metadata   │  │ • Metadata   │  │ • Metadata   │ │
-│  │ • Tools      │  │ • Tools      │  │ • Tools      │ │
-│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘ │
-│         │                  │                  │         │
-│         └──────────────────┼──────────────────┘         │
-│                            │                            │
-└────────────────────────────┼────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                         Your Application                             │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐              │
+│  │  AiActor A   │  │  AiActor B   │  │  AiActor C   │              │
+│  │              │  │              │  │              │              │
+│  │ • State      │  │ • State      │  │ • State      │              │
+│  │ • Metadata   │  │ • Metadata   │  │ • Metadata   │              │
+│  │ • Tools      │  │ • Tools      │  │ • Tools      │              │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘              │
+│         │                  │                  │                     │
+│         └──────────────────┼──────────────────┘                     │
+│                            │                                        │
+└────────────────────────────┼────────────────────────────────────────┘
                              │
-         ┌───────────────────┴───────────────────┐
-         │                                       │
-         ▼                                       ▼
-┌─────────────────┐                    ┌─────────────────┐
-│   LLM Client    │                    │  CodeModifier   │
-│                 │                    │                 │
-│ • Claude API    │                    │ • Code Writing  │
-│ • Tool Calling  │                    │ • Compilation   │
-│ • Structured    │                    │ • Hot Reload    │
-│   Output        │                    │ • Backups       │
-└─────────────────┘                    └─────────────────┘
+    ┌────────────────────────┼────────────────────────┐
+    │                        │                        │
+    ▼                        ▼                        ▼
+┌─────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│ LLM Client  │     │  ShadowRunner   │     │  CodeModifier   │
+│             │     │                 │     │                 │
+│ Multi-      │     │ • Shadow Mode   │     │ • Code Writing  │
+│ Provider:   │     │ • Validation    │     │ • Compilation   │
+│ • Anthropic │     │ • Stats         │     │ • Hot Reload    │
+│ • OpenRouter│     │ • Promotion     │     │ • Backups       │
+│ • Ollama    │     │                 │     │                 │
+└─────────────┘     └─────────────────┘     └─────────────────┘
+        │
+        ▼
+┌───────────────────────────────────────┐
+│        OptimizationEvaluator          │
+│                                       │
+│  Tier Selection:                      │
+│  • Deterministic (compile to code)    │
+│  • Local LLM (Ollama/Granite)         │
+│  • Accelerated (Cerebras/SambaNova)   │
+│  • Full LLM (Claude Sonnet)           │
+└───────────────────────────────────────┘
 ```
 
 ## Core Concepts
@@ -161,10 +173,17 @@ def deps do
 end
 ```
 
-Set your Anthropic API key:
+Set your API keys:
 
 ```bash
+# Required: Anthropic Claude (primary LLM)
 export ANTHROPIC_API_KEY="your-api-key"
+
+# Optional: OpenRouter for accelerated inference (Cerebras, SambaNova)
+export OPENROUTER_API_KEY="your-openrouter-key"
+
+# Optional: Ollama for local models (zero-cost inference)
+# Just ensure ollama is running: ollama serve
 ```
 
 ## Quick Start
@@ -336,9 +355,35 @@ Configure the LLM client in `config/config.exs`:
 
 ```elixir
 config :ai_actors,
-  llm_model: "claude-sonnet-4-5-20250929",
   max_tokens: 4096,
-  temperature: 1.0
+  temperature: 1.0,
+  enable_code_modification: true
+
+# Multi-provider LLM configuration
+config :ai_actors, :llm_providers,
+  anthropic: [
+    api_key: {:system, "ANTHROPIC_API_KEY"}
+    # Models: :sonnet, :haiku, :opus
+  ],
+  openrouter: [
+    api_key: {:system, "OPENROUTER_API_KEY"}
+    # Models: :cerebras_llama70b, :sambanova_llama405b, :groq_llama70b
+  ],
+  ollama: [
+    base_url: "http://localhost:11434",
+    models: [
+      granite_micro: "granite3.1-dense:2b",
+      granite_small: "granite3.1-dense:8b"
+    ]
+  ]
+
+# Shadow mode configuration (for multi-tier optimization)
+config :ai_actors, :shadow_config,
+  min_shadow_executions: 50,      # Minimum runs before promotion
+  min_match_rate: 0.98,           # 98% match required
+  max_crash_rate: 0.01,           # Max 1% crash rate
+  min_shadow_duration_hours: 24,  # Must run for 24+ hours
+  shadow_timeout_ms: 5000         # Timeout for shadow handlers
 ```
 
 ## Safety & Best Practices
@@ -425,13 +470,16 @@ LLMs enable:
 
 ## Roadmap
 
+- [x] Multi-LLM provider support (Anthropic, OpenRouter, Ollama)
+- [x] Multi-tier optimization (deterministic → local → accelerated → full)
+- [x] Shadow mode for safe handler validation
 - [ ] Distributed AiActor support
 - [ ] Built-in observability and metrics
 - [ ] Actor collaboration patterns
 - [ ] Enhanced tool validation
 - [ ] Conversation history persistence
-- [ ] Multi-LLM support
 - [ ] Visual actor state inspector
+- [ ] Learning dashboards
 
 ## Contributing
 

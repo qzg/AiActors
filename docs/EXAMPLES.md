@@ -473,6 +473,236 @@ test "LLM can analyze patterns" do
 end
 ```
 
+## Example 6: Multi-Provider LLM Usage
+
+Using different LLM providers for cost optimization.
+
+```elixir
+defmodule Examples.CostOptimizedActor do
+  use AiActors.AiActor
+
+  @impl true
+  def init(_) do
+    {:ok, %{queries: []}}
+  end
+
+  @impl true
+  def development_metadata do
+    %{
+      purpose: "Demonstrate multi-provider LLM usage for cost optimization",
+      version: "1.0.0"
+    }
+  end
+
+  # Simple queries use local Ollama (free)
+  def handle_call({:simple_query, question}, _from, state) do
+    result = AiActors.LLMClient.send_message(
+      [%{role: "user", content: question}],
+      provider: :ollama,
+      model: :granite_micro,
+      max_tokens: 256
+    )
+    {:reply, result, state}
+  end
+
+  # Fast queries use Cerebras via OpenRouter
+  def handle_call({:fast_query, question}, _from, state) do
+    result = AiActors.LLMClient.send_message(
+      [%{role: "user", content: question}],
+      provider: :openrouter,
+      model: :cerebras_llama70b,
+      max_tokens: 512
+    )
+    {:reply, result, state}
+  end
+
+  # Complex queries use Claude (most capable)
+  def handle_call({:complex_query, question}, _from, state) do
+    result = AiActors.LLMClient.send_message(
+      [%{role: "user", content: question}],
+      provider: :anthropic,
+      model: :sonnet,
+      max_tokens: 4096
+    )
+    {:reply, result, state}
+  end
+
+  # Unknown queries escalate to full LLM
+  def handle_call(_msg, _from, _state), do: :escalate_to_llm
+end
+
+# Usage
+{:ok, pid} = Examples.CostOptimizedActor.start_link([])
+
+# Free - Local Ollama (~50-200ms)
+GenServer.call(pid, {:simple_query, "What is 2+2?"})
+
+# Fast - Cerebras (~100-500ms, ~$0.001)
+GenServer.call(pid, {:fast_query, "Summarize this paragraph..."})
+
+# Capable - Claude (~1-5s, ~$0.01)
+GenServer.call(pid, {:complex_query, "Analyze this code and suggest improvements..."})
+```
+
+## Example 7: Self-Learning with Shadow Mode
+
+An actor that learns and validates handlers safely.
+
+```elixir
+defmodule Examples.ShadowLearningActor do
+  use AiActors.AiActor
+
+  @impl true
+  def init(_) do
+    {:ok, %{counter: 0, operations: []}}
+  end
+
+  @impl true
+  def enable_self_learning?, do: true
+
+  @impl true
+  def self_learning_config do
+    %{
+      review_interval_hours: 4,           # Frequent reviews
+      min_escalations_for_analysis: 5,    # Learn quickly
+      pattern_threshold: 2,               # Low threshold
+      validation_window_hours: 24
+    }
+  end
+
+  @impl true
+  def development_metadata do
+    %{
+      purpose: "Demonstrate shadow mode learning",
+      design_decisions: [
+        "Start with minimal handlers",
+        "Let system learn common patterns",
+        "Shadow mode validates before promotion"
+      ],
+      version: "1.0.0"
+    }
+  end
+
+  # Only handle increment explicitly
+  defp handle_call_impl({:increment, n}, _from, state) when is_number(n) do
+    new_counter = state.counter + n
+    {:reply, new_counter, %{state | counter: new_counter}}
+  end
+
+  # Everything else escalates - will be learned over time
+  defp handle_call_impl(_msg, _from, _state), do: :escalate_to_llm
+
+  defp handle_cast_impl(_msg, state), do: {:noreply, state}
+  defp handle_info_impl(_msg, state), do: {:noreply, state}
+end
+
+# Usage
+{:ok, pid} = Examples.ShadowLearningActor.start_link([])
+
+# This is handled explicitly (fast)
+GenServer.call(pid, {:increment, 5})  # => 5
+
+# These escalate to LLM initially
+GenServer.call(pid, {:multiply, 2})   # Escalates, ~1500ms
+GenServer.call(pid, {:multiply, 3})   # Escalates, ~1500ms
+GenServer.call(pid, {:multiply, 4})   # Escalates, ~1500ms
+
+# After enough escalations, trigger review
+{:ok, result} = Examples.ShadowLearningActor.trigger_review(pid)
+
+# System analyzes {:multiply, :_number} pattern
+# If responses are consistent, registers shadow handler
+
+# Now {:multiply, n} runs in shadow mode:
+# - Primary: Still uses LLM
+# - Shadow: Tests generated handler in parallel
+# - Results compared, stats tracked
+
+# Check shadow stats
+stats = AiActors.ShadowRunner.get_shadow_stats(
+  Examples.ShadowLearningActor,
+  {:multiply, :_number}
+)
+# => %{executions: 50, match_rate: 0.98, crash_rate: 0.0}
+
+# When promotion criteria met (50+ runs, 98%+ match, <1% crash, 24h):
+# Handler is promoted to primary
+# {:multiply, n} now executes in ~1ms instead of ~1500ms
+```
+
+## Example 8: Multi-Tier Optimization in Action
+
+Showing how patterns get optimized to different tiers.
+
+```elixir
+defmodule Examples.TieredOptimizationDemo do
+  use AiActors.AiActor
+
+  @impl true
+  def init(_) do
+    {:ok, %{data: %{}}}
+  end
+
+  @impl true
+  def enable_self_learning?, do: true
+
+  @impl true
+  def self_learning_config do
+    %{
+      review_interval_hours: 2,
+      min_escalations_for_analysis: 3,
+      pattern_threshold: 2,
+      validation_window_hours: 12
+    }
+  end
+
+  @impl true
+  def development_metadata do
+    %{
+      purpose: "Demonstrate multi-tier optimization selection",
+      version: "1.0.0"
+    }
+  end
+
+  # All messages escalate initially
+  defp handle_call_impl(_msg, _from, _state), do: :escalate_to_llm
+  defp handle_cast_impl(_msg, state), do: {:noreply, state}
+  defp handle_info_impl(_msg, state), do: {:noreply, state}
+end
+
+# Simulation showing tier selection
+
+# Pattern 1: Always returns same answer -> DETERMINISTIC
+# {:get_constant, :pi} always returns 3.14159
+# => Compiled to: defp handle_call_impl({:get_constant, :pi}, ...) do {:reply, 3.14159, state} end
+
+# Pattern 2: Simple math, low tokens -> LOCAL LLM (Ollama)
+# {:calculate, "2+2"} -> Uses granite_micro locally
+# => Free, ~100ms latency
+
+# Pattern 3: Moderate complexity -> ACCELERATED (Cerebras)
+# {:summarize, text} -> Uses cerebras_llama70b
+# => ~$0.001, ~300ms latency
+
+# Pattern 4: Complex reasoning -> KEEP FULL LLM
+# {:analyze_code, code} -> Keeps using Claude Sonnet
+# => ~$0.01, ~2s latency, but most accurate
+
+# Check what tier was selected for each pattern:
+result = AiActors.OptimizationEvaluator.evaluate_pattern(
+  Examples.TieredOptimizationDemo,
+  {:get_constant, :_atom},
+  escalation_history
+)
+
+case result do
+  {:deterministic, code} -> IO.puts("Compile to code")
+  {:local_llm, _, model} -> IO.puts("Use #{model} locally")
+  {:accelerated_llm, _, model} -> IO.puts("Use #{model} via OpenRouter")
+  :keep_current -> IO.puts("Keep using Claude")
+end
+```
+
 ## Best Practices from Examples
 
 1. **Explicit handlers for known operations** - Fast and predictable
@@ -481,3 +711,6 @@ end
 4. **Custom tools for domain operations** - Safe, typed interactions
 5. **Track relevant metrics** - Enables LLM analysis
 6. **Clear documentation** - Benefits both humans and LLM
+7. **Use multi-tier optimization** - Reduce costs with appropriate tiers
+8. **Enable shadow mode** - Validate handlers safely before promotion
+9. **Choose providers wisely** - Local for simple, accelerated for moderate, full for complex

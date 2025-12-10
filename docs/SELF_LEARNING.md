@@ -8,7 +8,7 @@ AiActors can learn from their interactions and evolve to handle common patterns 
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                   Self-Learning Cycle                    │
+│          Self-Learning with Shadow Mode                  │
 └─────────────────────────────────────────────────────────┘
 
 1. TRACK
@@ -19,33 +19,39 @@ AiActors can learn from their interactions and evolve to handle common patterns 
    - Execution time
    - Timestamp
 
-2. ANALYZE
+2. ANALYZE (OptimizationEvaluator)
    ↓
-   Periodic review identifies patterns:
+   Periodic review identifies patterns and optimal tier:
    - Group similar messages
-   - Find frequently occurring patterns
-   - Generate handler recommendations
+   - Analyze response variance
+   - Select optimization tier:
+     • Deterministic (95%+ identical responses)
+     • Local LLM (simple, low-token patterns)
+     • Accelerated LLM (moderate complexity)
+     • Keep Full LLM (complex reasoning)
 
-3. IMPLEMENT
+3. SHADOW MODE (ShadowRunner)
    ↓
-   Auto-generate deterministic handlers:
-   - Create Elixir function code
-   - Add tracking instrumentation
-   - Integrate via CodeModifier
+   Register shadow handlers for safe validation:
+   - Run in parallel with primary handler
+   - Crash-isolated (won't affect primary)
+   - Compare results with primary response
+   - Track statistics (match rate, crashes)
 
 4. VALIDATE
    ↓
-   Monitor new handler performance:
-   - Track success rate
-   - Measure execution time
-   - Compare vs LLM escalation
+   Automatic promotion criteria:
+   - 50+ shadow executions
+   - 98%+ match rate with primary
+   - <1% crash rate
+   - 24+ hours of shadow runtime
 
-5. ITERATE
+5. PROMOTE
    ↓
-   Continuous improvement:
-   - Refine handlers that need work
-   - Add more handlers for new patterns
-   - Remove ineffective handlers
+   Hot-reload optimized handler:
+   - CodeModifier compiles new code
+   - Handler replaces LLM escalation
+   - Continue monitoring for issues
 ```
 
 ## Key Components
@@ -75,7 +81,69 @@ stats = AiActors.EscalationTracker.get_statistics(MyActor)
 {:ok, analysis} = AiActors.EscalationTracker.analyze_patterns(MyActor)
 ```
 
-### 2. SelfLearning Module
+### 2. OptimizationEvaluator
+
+Analyzes patterns and recommends optimization tiers.
+
+```elixir
+# Evaluate a specific pattern
+result = AiActors.OptimizationEvaluator.evaluate_pattern(
+  MyActor,
+  {:multiply, :_number},  # normalized pattern
+  escalation_history
+)
+
+case result do
+  {:deterministic, code} ->
+    # Pattern always produces same response - compile to code
+    IO.puts("Generated handler: #{code}")
+
+  {:local_llm, prompt_template, :granite_micro} ->
+    # Use local Ollama for this pattern (zero cost)
+    IO.puts("Use local LLM with prompt template")
+
+  {:accelerated_llm, prompt_template, :cerebras_llama70b} ->
+    # Use fast accelerated inference
+    IO.puts("Use Cerebras for faster inference")
+
+  :keep_current ->
+    # Pattern requires full Claude reasoning
+    IO.puts("Keep using Claude Sonnet")
+end
+```
+
+### 3. ShadowRunner
+
+Manages shadow handlers for safe validation before promotion.
+
+```elixir
+# Register a shadow handler
+handler_spec = %{
+  type: :deterministic,
+  code: "def handle_call({:multiply, n}, _from, state) do...",
+  created_at: DateTime.utc_now()
+}
+
+:ok = AiActors.ShadowRunner.register_shadow(MyActor, {:multiply, :_number}, handler_spec)
+
+# Shadow handlers run automatically in parallel with primary
+# Check statistics
+{:ok, stats} = AiActors.ShadowRunner.get_shadow_stats(MyActor, {:multiply, :_number})
+# %{
+#   executions: 75,
+#   matches: 74,
+#   mismatches: 1,
+#   crashes: 0,
+#   match_rate: 0.9867,
+#   crash_rate: 0.0,
+#   first_execution_at: ~U[2025-01-15 10:00:00Z]
+# }
+
+# When criteria met, promote to primary
+{:ok, ref} = AiActors.ShadowRunner.promote_shadow(MyActor, {:multiply, :_number})
+```
+
+### 4. SelfLearning Module
 
 Orchestrates the learning workflow.
 
@@ -83,17 +151,14 @@ Orchestrates the learning workflow.
 # Start periodic learning
 {:ok, timer} = AiActors.SelfLearning.start_learning(pid, MyActor)
 
-# Perform immediate review
+# Perform immediate review (analyzes + registers shadows)
 {:ok, result} = AiActors.SelfLearning.perform_review(MyActor)
 
 # Generate learning report
 report = AiActors.SelfLearning.generate_report(MyActor)
 
-# Validate handlers
-{:ok, validation} = AiActors.SelfLearning.validate_handlers(
-  MyActor,
-  implementations
-)
+# Check and promote eligible shadows
+{:ok, promotions} = AiActors.SelfLearning.check_promotions(MyActor)
 ```
 
 ### 3. Enhanced AiActor
@@ -433,25 +498,29 @@ IO.puts "Savings: $#{savings}"
 
 ## Performance Impact
 
-### Escalation vs Handler
+### Multi-Tier Performance Comparison
 
-|   | LLM Escalation | Learned Handler | Improvement |
-|---|----------------|-----------------|-------------|
-| Latency | 1000-3000ms | 1-10ms | **100-300x faster** |
-| Cost | $0.001-0.01 | $0 | **100% savings** |
-| Reliability | Network dependent | Local | **More reliable** |
+| Tier | Latency | Cost/Request | Use Case |
+|------|---------|--------------|----------|
+| Deterministic | ~1ms | $0 | Identical responses |
+| Local LLM (Ollama) | ~50-200ms | $0 | Simple patterns |
+| Accelerated (Cerebras) | ~100-500ms | ~$0.001 | Moderate complexity |
+| Full LLM (Claude) | 1-5s | ~$0.01 | Complex reasoning |
 
 ### Example: 1000 requests/day
 
-**Without Learning:**
-- All escalate to LLM
+**Without Optimization:**
+- All escalate to full LLM
 - Cost: $10/day
 - Avg latency: 1500ms
 
-**With Learning (after 1 week):**
-- 80% handled deterministically
-- Cost: $2/day (80% reduction)
-- Avg latency: 350ms (77% reduction)
+**With Multi-Tier Optimization (after 1 week):**
+- 40% deterministic handlers (~1ms, $0)
+- 30% local LLM (~100ms, $0)
+- 20% accelerated (~300ms, ~$2/day)
+- 10% full LLM (~1500ms, ~$1/day)
+- **Total cost: $3/day (70% reduction)**
+- **Avg latency: ~200ms (87% reduction)**
 
 ## Troubleshooting
 
@@ -547,7 +616,14 @@ end
 
 ## Future Enhancements
 
-Planned features:
+Completed:
+
+- [x] Multi-tier optimization (deterministic/local/accelerated/full)
+- [x] Shadow mode for safe validation
+- [x] Multi-provider LLM support
+- [x] Automatic promotion criteria
+
+Planned:
 
 - [ ] Semantic pattern grouping (via embeddings)
 - [ ] Multi-actor learning (share patterns across actors)

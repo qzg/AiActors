@@ -50,14 +50,25 @@ AiActor wraps your state with AI capabilities.
 ### Layer 3: Infrastructure Services
 
 ```
-┌──────────────┐         ┌──────────────┐
-│  LLMClient   │         │CodeModifier  │
-│              │         │              │
-│ • API calls  │         │ • Validation │
-│ • Tools      │         │ • Backup     │
-│ • Streaming  │         │ • Compile    │
-│              │         │ • Reload     │
-└──────────────┘         └──────────────┘
+┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+│  LLMClient   │    │ LLMProvider  │    │ShadowRunner  │    │CodeModifier  │
+│              │    │              │    │              │    │              │
+│ • Multi-prov │    │ • Anthropic  │    │ • Shadow     │    │ • Validation │
+│ • Tools      │    │ • OpenRouter │    │   handlers   │    │ • Backup     │
+│ • Structured │    │ • Ollama     │    │ • Stats      │    │ • Compile    │
+│   output     │    │              │    │ • Promotion  │    │ • Reload     │
+└──────────────┘    └──────────────┘    └──────────────┘    └──────────────┘
+                           │
+                           ▼
+                    ┌──────────────────┐
+                    │ Optimization     │
+                    │ Evaluator        │
+                    │                  │
+                    │ • Pattern        │
+                    │   analysis       │
+                    │ • Tier selection │
+                    │ • Code gen       │
+                    └──────────────────┘
 ```
 
 Supporting services provide core functionality.
@@ -337,24 +348,29 @@ end
 
 ## Performance Characteristics
 
-### Known Messages
+### Known Messages (Explicit Handlers)
 
 - **Latency**: Microseconds (standard GenServer)
 - **Throughput**: Thousands per second
 - **Cost**: Zero
 
-### LLM-Escalated Messages
+### Multi-Tier Optimization
 
-- **Latency**: 1-5 seconds (network + LLM processing)
-- **Throughput**: Limited by API rate limits
-- **Cost**: Per-request pricing
+The system automatically selects the optimal tier for each pattern:
+
+| Tier | Latency | Cost | Use Case |
+|------|---------|------|----------|
+| Deterministic | ~1ms | $0 | Identical responses (95%+ same) |
+| Local LLM (Ollama) | ~50-200ms | $0 | Simple patterns, low tokens |
+| Accelerated (Cerebras) | ~100-500ms | ~$0.001 | Moderate complexity |
+| Full LLM (Claude) | 1-5s | ~$0.01 | Complex reasoning |
 
 ### Optimization Strategies
 
-1. **Cache LLM responses** for repeated queries
-2. **Use explicit handlers** for common operations
-3. **Batch operations** where possible
-4. **Pre-warm tools** list in system prompt
+1. **Multi-tier optimization** - Automatically downgrade to cheaper/faster tiers
+2. **Shadow mode validation** - Test handlers safely before promotion
+3. **Use explicit handlers** for known operations
+4. **Pattern analysis** - Identify common escalations
 5. **Monitor and optimize** token usage
 
 ## Scaling Considerations
@@ -410,18 +426,24 @@ end
 
 ## Future Enhancements
 
+### Completed Features
+
+- [x] Multi-provider LLM support (Anthropic, OpenRouter, Ollama)
+- [x] Multi-tier optimization (deterministic → local → accelerated → full)
+- [x] Shadow mode for safe handler validation
+- [x] Automatic pattern analysis and optimization
+
 ### Planned Features
 
 - [ ] Conversation persistence (ETS/database)
 - [ ] Multi-actor coordination patterns
 - [ ] Built-in observability (metrics, tracing)
 - [ ] Response streaming for long operations
-- [ ] Alternative LLM providers
 - [ ] Vector memory for context retrieval
+- [ ] Learning dashboards
 
 ### Research Directions
 
-- Actor learning from interactions
 - Cross-actor knowledge sharing
 - Automatic tool discovery
 - Federated actor networks
