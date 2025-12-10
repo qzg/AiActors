@@ -34,10 +34,10 @@ defmodule AiActors.LLMClientTest do
         ]
       }
 
-      # The parser concatenates all text blocks
+      # The parser concatenates all text blocks and extracts JSON
       result = LLMClient.parse_structured_response(response)
-      # This will fail to parse because of the prefix, but documents the behavior
-      assert {:error, _} = result
+      # The improved JSON extraction can find JSON objects in mixed text
+      assert {:ok, %{"result" => true}} = result
     end
 
     test "returns error for invalid JSON" do

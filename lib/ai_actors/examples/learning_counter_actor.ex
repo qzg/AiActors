@@ -32,8 +32,8 @@ defmodule AiActors.Examples.LearningCounterActor do
 
   use AiActors.AiActor
 
-  @impl AiActors.AiActor
-  def init(initial_value \\ 0) do
+  # Initialize user state - don't override init, override init_impl  
+  defp init_impl(initial_value \\ 0) do
     {:ok, %{counter: initial_value, operations: []}}
   end
 
@@ -70,9 +70,9 @@ defmodule AiActors.Examples.LearningCounterActor do
     }
   end
 
-  # Initial explicit handlers (minimal set)
+  # Initial explicit handlers (minimal set) - use handle_call_impl to work with framework
 
-  def handle_call({:increment, amount}, _from, state) when is_number(amount) do
+  defp handle_call_impl({:increment, amount}, _from, state) when is_number(amount) do
     start_time = System.monotonic_time(:millisecond)
 
     new_value = state.counter + amount
@@ -94,7 +94,7 @@ defmodule AiActors.Examples.LearningCounterActor do
     {:reply, new_value, new_state}
   end
 
-  def handle_call({:decrement, amount}, _from, state) when is_number(amount) do
+  defp handle_call_impl({:decrement, amount}, _from, state) when is_number(amount) do
     start_time = System.monotonic_time(:millisecond)
 
     new_value = state.counter - amount
@@ -116,20 +116,20 @@ defmodule AiActors.Examples.LearningCounterActor do
     {:reply, new_value, new_state}
   end
 
-  def handle_call(:get_value, _from, state) do
+  defp handle_call_impl(:get_value, _from, state) do
     {:reply, state.counter, state}
   end
 
   # All other messages escalate to LLM (where learning happens)
-  def handle_call(_msg, _from, _state) do
+  defp handle_call_impl(_msg, _from, _state) do
     :escalate_to_llm
   end
 
-  def handle_cast(_msg, _state) do
+  defp handle_cast_impl(_msg, _state) do
     :escalate_to_llm
   end
 
-  def handle_info(_msg, state) do
+  defp handle_info_impl(_msg, state) do
     {:noreply, state}
   end
 

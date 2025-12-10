@@ -8,8 +8,8 @@ defmodule AiActors.Examples.TaskManagerActor do
 
   use AiActors.AiActor
 
-  @impl AiActors.AiActor
-  def init(_args) do
+  # Initialize user state - don't override init, override init_impl
+  defp init_impl(_args) do
     {:ok,
      %{
        tasks: [],
@@ -183,9 +183,9 @@ defmodule AiActors.Examples.TaskManagerActor do
     GenServer.call(server, {:list_tasks, status})
   end
 
-  # Message handlers
+  # Message handlers - use handle_call_impl to work with framework
 
-  def handle_call({:create_task, title, description, priority}, _from, state) do
+  defp handle_call_impl({:create_task, title, description, priority}, _from, state) do
     task = %{
       id: state.next_id,
       title: title,
@@ -205,7 +205,7 @@ defmodule AiActors.Examples.TaskManagerActor do
     {:reply, {:ok, task}, new_state}
   end
 
-  def handle_call({:complete_task, task_id}, _from, state) do
+  defp handle_call_impl({:complete_task, task_id}, _from, state) do
     case Enum.find_index(state.tasks, &(&1.id == task_id)) do
       nil ->
         {:reply, {:error, :not_found}, state}
@@ -225,7 +225,7 @@ defmodule AiActors.Examples.TaskManagerActor do
     end
   end
 
-  def handle_call({:list_tasks, status}, _from, state) do
+  defp handle_call_impl({:list_tasks, status}, _from, state) do
     filtered_tasks =
       case status do
         :all -> state.tasks
@@ -237,7 +237,15 @@ defmodule AiActors.Examples.TaskManagerActor do
   end
 
   # Escalate unknown messages to LLM
-  def handle_call(_msg, _from, _state) do
+  defp handle_call_impl(_msg, _from, _state) do
     :escalate_to_llm
+  end
+
+  defp handle_cast_impl(_msg, state) do
+    {:noreply, state}
+  end
+
+  defp handle_info_impl(_msg, state) do
+    {:noreply, state}
   end
 end

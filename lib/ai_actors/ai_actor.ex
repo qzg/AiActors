@@ -103,6 +103,7 @@ defmodule AiActors.AiActor do
     quote do
       use GenServer
       @behaviour AiActors.AiActor
+      @before_compile AiActors.AiActor
 
       require Logger
 
@@ -217,10 +218,7 @@ defmodule AiActors.AiActor do
         end
       end
 
-      # This will be overridden by the implementing module
-      defp init_impl(_args) do
-        {:ok, %{}}
-      end
+      # Users MUST define init_impl/1 to initialize their state
 
       @doc false
       def handle_call({:__ai_actor_ask_llm__, prompt, context}, from, state) do
@@ -279,10 +277,7 @@ defmodule AiActors.AiActor do
         end
       end
 
-      # Default implementation that escalates everything
-      defp handle_call_impl(_msg, _from, state) do
-        :escalate_to_llm
-      end
+      # Users must define handle_call_impl/3 - no default provided
 
       @doc false
       def handle_cast(msg, state) do
@@ -301,9 +296,7 @@ defmodule AiActors.AiActor do
         end
       end
 
-      defp handle_cast_impl(_msg, state) do
-        :escalate_to_llm
-      end
+      # Users must define handle_cast_impl/2 - no default provided
 
       @doc false
       def handle_info({:code_modification_result, ref, result}, state) do
@@ -377,12 +370,46 @@ defmodule AiActors.AiActor do
         end
       end
 
-      defp handle_info_impl(_msg, state) do
-        {:noreply, state}
-      end
+      # Users must define handle_info_impl/2 - no default provided
 
       # Allow the module to override our init wrapper
       defoverridable init: 1, handle_call: 3, handle_cast: 2, handle_info: 2
+    end
+  end
+
+  @doc false
+  defmacro __before_compile__(env) do
+    # Check if the user module defines handle_call/3
+    if Module.defines?(env.module, {:handle_call, 3}, :def) do
+      # Check if it's actually overriding our implementation (not just from GenServer)
+      quote do
+        require Logger
+
+        Logger.warning("""
+        #{__MODULE__} overrides handle_call/3 directly, which may break AiActor framework features.
+
+        To fix:
+        1. Rename your handle_call/3 clauses to handle_call_impl/3
+        2. Make them private (defp instead of def)
+        3. The framework will call your handle_call_impl/3 automatically
+
+        Example:
+          # Instead of:
+          def handle_call({:increment, n}, _from, state) do
+            {:reply, n, state}
+          end
+
+          # Use:
+          defp handle_call_impl({:increment, n}, _from, state) do
+            {:reply, n, state}
+          end
+
+        See WARP.md for more details.
+        """)
+      end
+    else
+      quote do
+      end
     end
   end
 
@@ -604,9 +631,20 @@ defmodule AiActors.AiActor do
             structured_output: %{
               type: "object",
               properties: %{
-                action: %{type: "string", enum: ["reply", "noreply", "error"]},
-                value: %{},
-                state_updates: %{type: "object"}
+                action: %{
+                  type: "string",
+                  enum: ["reply", "noreply", "error"],
+                  description: "The type of response to provide"
+                },
+                value: %{
+                  type: "string",
+                  description: "The reply value (as JSON string) or error reason"
+                },
+                state_updates: %{
+                  type: "object",
+                  description: "Map of state updates to apply",
+                  additionalProperties: true
+                }
               },
               required: ["action"]
             }

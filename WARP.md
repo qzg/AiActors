@@ -90,7 +90,8 @@ Without this, all LLM interactions will fail.
   - Claude API integration using Anthropic's API
   - Handles tool/function calling with automatic loop until completion
   - Default model: `claude-sonnet-4-5-20250929`
-  - Supports structured output via prompt caching
+  - Uses Claude's native structured outputs API (beta) for guaranteed JSON schema compliance
+  - Beta header: `structured-outputs-2025-11-13`
 
 - **`AiActors.CodeModifier`** (`lib/ai_actors/code_modifier.ex`)
   - Performs hot code reloading of actor modules
@@ -138,18 +139,42 @@ Without this, all LLM interactions will fail.
 
 ## Development Patterns
 
+### Important: Use _impl Functions, Not GenServer Callbacks
+
+**Critical**: When implementing AiActors, you must use private `*_impl` functions instead of the standard GenServer callbacks.
+
+The framework wraps your state and provides its own callbacks that:
+- Handle internal framework messages (`:__ai_actor_*`)
+- Wrap/unwrap state automatically
+- Intercept `:escalate_to_llm` returns and forward to LLM
+
+If you override the GenServer callbacks directly, you'll break framework features.
+
+**Use these patterns:**
+
+```elixir
+# ❌ WRONG - Don't override GenServer callbacks:
+def init(args), do: {:ok, %{counter: 0}}
+def handle_call({:increment, n}, _from, state), do: {:reply, n, state}
+
+# ✅ CORRECT - Use _impl private functions:
+defp init_impl(args), do: {:ok, %{counter: 0}}
+defp handle_call_impl({:increment, n}, _from, state), do: {:reply, n, state}
+defp handle_cast_impl(msg, state), do: {:noreply, state}
+defp handle_info_impl(msg, state), do: {:noreply, state}
+```
+
+**Note**: You must define ALL four `*_impl` functions in your module.
+
 ### Creating a New AiActor
 
 ```elixir
 defmodule MyApp.MyActor do
   use AiActors.AiActor
 
-  @impl AiActors.AiActor
-  def init(args) do
-    state = %{
-      # Your state here
-    }
-    {:ok, state}
+  # Initialize state (use init_impl, not init)
+  defp init_impl(_args) do
+    {:ok, %{counter: 0, data: []}}
   end
 
   @impl AiActors.AiActor
@@ -166,15 +191,19 @@ defmodule MyApp.MyActor do
   end
 
   # Explicit handlers for known operations
-  def handle_call({:known_operation, arg}, _from, state) do
+  defp handle_call_impl({:known_operation, arg}, _from, state) do
     # Fast, deterministic handling
     {:reply, result, new_state}
   end
 
   # Unknown messages escalate to LLM
-  def handle_call(_unknown, _from, _state) do
+  defp handle_call_impl(_unknown, _from, _state) do
     :escalate_to_llm
   end
+
+  # Required: handle_cast_impl and handle_info_impl
+  defp handle_cast_impl(_msg, state), do: {:noreply, state}
+  defp handle_info_impl(_msg, state), do: {:noreply, state}
 end
 ```
 
@@ -274,6 +303,18 @@ config :ai_actors,
 - **Latency**: LLM calls take 1-5 seconds vs microseconds for explicit handlers
 - **Rate Limits**: Anthropic API has rate limits - design for graceful degradation
 - **Best Practice**: Use explicit handlers for known patterns, LLM for truly unknown/complex cases
+
+### Structured Outputs API
+The LLMClient uses Claude's native structured outputs API (public beta) for guaranteed JSON schema compliance:
+
+- **Beta Header**: `structured-outputs-2025-11-13` - automatically added when `structured_output` option is used
+- **Format**: Uses `output_format: { type: "json_schema", schema: <schema> }` parameter
+- **Constrained Decoding**: Guarantees responses match the schema exactly - no more JSON.parse() errors
+- **Schema Requirements**:
+  - All object types should have `additionalProperties: false` (auto-added by framework)
+  - Empty schemas (`%{}`) are not supported - always specify concrete types
+  - Supported models: Claude Sonnet 4.5, Claude Opus 4.1, Claude Opus 4.5, Claude Haiku 4.5
+- **Edge Cases**: `stop_reason: "refusal"` or `stop_reason: "max_tokens"` may result in non-compliant output
 
 ### Tool Execution
 - Tools must have valid JSON schemas

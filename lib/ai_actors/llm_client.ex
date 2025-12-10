@@ -1,9 +1,9 @@
 defmodule AiActors.LLMClient do
-  @moduledoc """
+@moduledoc """
   Client for interacting with Claude API (Anthropic).
 
   Handles:
-  - Message sending with structured output support
+  - Message sending with structured output support (using Claude's native structured outputs)
   - Tool/function calling
   - Streaming responses (optional)
   """
@@ -13,6 +13,7 @@ defmodule AiActors.LLMClient do
   @api_base "https://api.anthropic.com/v1"
   @default_model "claude-sonnet-4-5-20250929"
   @api_version "2023-06-01"
+  @structured_outputs_beta "structured-outputs-2025-11-13"
 
   @type message :: %{
           role: String.t(),
@@ -36,7 +37,7 @@ defmodule AiActors.LLMClient do
   - `:temperature` - Sampling temperature (default: 1.0)
   - `:tools` - List of available tools
   - `:system` - System prompt
-  - `:structured_output` - Schema for structured output via prompt caching
+  - `:structured_output` - JSON schema for structured output (uses Claude's native structured outputs API)
   """
   @spec send_message(list(message()), keyword()) :: response()
   def send_message(messages, opts \\ []) do
@@ -47,12 +48,9 @@ defmodule AiActors.LLMClient do
     end
 
     body = build_request_body(messages, opts)
+    use_structured_outputs = Keyword.has_key?(opts, :structured_output)
 
-    headers = [
-      {"x-api-key", api_key},
-      {"anthropic-version", @api_version},
-      {"content-type", "application/json"}
-    ]
+    headers = build_headers(api_key, use_structured_outputs)
 
     case Req.post("#{@api_base}/messages", json: body, headers: headers) do
       {:ok, %{status: 200, body: response_body}} ->
@@ -65,6 +63,20 @@ defmodule AiActors.LLMClient do
       {:error, reason} ->
         Logger.error("LLM request failed: #{inspect(reason)}")
         {:error, reason}
+    end
+  end
+
+  defp build_headers(api_key, use_structured_outputs) do
+    base_headers = [
+      {"x-api-key", api_key},
+      {"anthropic-version", @api_version},
+      {"content-type", "application/json"}
+    ]
+
+    if use_structured_outputs do
+      [{"anthropic-beta", @structured_outputs_beta} | base_headers]
+    else
+      base_headers
     end
   end
 
@@ -150,17 +162,14 @@ defmodule AiActors.LLMClient do
 
     body =
       if structured_schema = Keyword.get(opts, :structured_output) do
-        # Add structured output instructions to system prompt
-        structured_system = """
-        You must respond with valid JSON matching this schema:
-        #{Jason.encode!(structured_schema, pretty: true)}
+        # Use Claude's native structured outputs API
+        # This guarantees schema-compliant JSON through constrained decoding
+        output_format = %{
+          type: "json_schema",
+          schema: transform_schema(structured_schema)
+        }
 
-        Respond ONLY with the JSON object, no other text.
-        """
-
-        existing_system = Map.get(body, :system, "")
-
-        Map.put(body, :system, existing_system <> "\n\n" <> structured_system)
+        Map.put(body, :output_format, output_format)
       else
         body
       end
@@ -168,12 +177,44 @@ defmodule AiActors.LLMClient do
     body
   end
 
+  # Transform schema to ensure it meets Claude's structured output requirements
+  defp transform_schema(schema) do
+    schema
+    |> ensure_additional_properties_false()
+  end
+
+  # Add additionalProperties: false to all object types for strict validation
+  defp ensure_additional_properties_false(schema) when is_map(schema) do
+    schema = 
+      if Map.get(schema, :type) == "object" or Map.get(schema, "type") == "object" do
+        Map.put(schema, :additionalProperties, false)
+      else
+        schema
+      end
+
+    # Recursively process nested schemas
+    Enum.reduce(schema, %{}, fn
+      {:properties, props}, acc when is_map(props) ->
+        Map.put(acc, :properties, Map.new(props, fn {k, v} -> {k, ensure_additional_properties_false(v)} end))
+      {"properties", props}, acc when is_map(props) ->
+        Map.put(acc, "properties", Map.new(props, fn {k, v} -> {k, ensure_additional_properties_false(v)} end))
+      {:items, items}, acc when is_map(items) ->
+        Map.put(acc, :items, ensure_additional_properties_false(items))
+      {"items", items}, acc when is_map(items) ->
+        Map.put(acc, "items", ensure_additional_properties_false(items))
+      {k, v}, acc ->
+        Map.put(acc, k, v)
+    end)
+  end
+  defp ensure_additional_properties_false(value), do: value
+
   defp get_api_key do
     System.get_env("ANTHROPIC_API_KEY")
   end
 
   @doc """
   Parse a structured JSON response from the LLM.
+  Handles cases where JSON is embedded in markdown code blocks or surrounded by text.
   """
   @spec parse_structured_response(map()) :: {:ok, map()} | {:error, term()}
   def parse_structured_response(%{"content" => content}) do
@@ -183,9 +224,39 @@ defmodule AiActors.LLMClient do
       |> Enum.map(&Map.get(&1, "text"))
       |> Enum.join("\n")
 
+    # Try parsing directly first
     case Jason.decode(text) do
-      {:ok, data} -> {:ok, data}
-      {:error, _} = error -> error
+      {:ok, data} ->
+        {:ok, data}
+
+      {:error, _} ->
+        # Try to extract JSON from markdown code blocks
+        extracted = extract_json_from_text(text)
+        case Jason.decode(extracted) do
+          {:ok, data} -> {:ok, data}
+          {:error, _} = error -> error
+        end
+    end
+  end
+
+  # Extract JSON from text that may contain markdown code blocks or extra text
+  defp extract_json_from_text(text) do
+    cond do
+      # Try markdown code block with json tag
+      match = Regex.run(~r/```json\s*\n?(.*?)\n?```/s, text) ->
+        Enum.at(match, 1) |> String.trim()
+
+      # Try markdown code block without tag
+      match = Regex.run(~r/```\s*\n?(\{.*?\})\n?```/s, text) ->
+        Enum.at(match, 1) |> String.trim()
+
+      # Try to find a JSON object in the text
+      match = Regex.run(~r/(\{[\s\S]*\})/s, text) ->
+        Enum.at(match, 1) |> String.trim()
+
+      # Return original text if no pattern matches
+      true ->
+        String.trim(text)
     end
   end
 end

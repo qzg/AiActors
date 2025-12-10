@@ -70,17 +70,19 @@ defmodule MyApp.MyActor do
     }
   end
 
-  # Handle known messages explicitly
-  def handle_call({:increment, n}, _from, state) do
+  # Handle known messages explicitly - use handle_call_impl
+  defp handle_call_impl({:increment, n}, _from, state) do
     {:reply, state.counter + n, %{state | counter: state.counter + n}}
   end
 
   # Unknown messages automatically escalate to LLM
-  def handle_call(_unknown, _from, _state) do
+  defp handle_call_impl(_unknown, _from, _state) do
     :escalate_to_llm
   end
 end
 ```
+
+> **Important**: Use `handle_call_impl/3` instead of `handle_call/3` to allow the framework to intercept messages and handle LLM escalation. See [WARP.md](WARP.md) for details.
 
 ### LLM Integration
 
@@ -184,8 +186,8 @@ defmodule MyApp.TaskManager do
     }
   end
 
-  # Explicit handlers for known operations
-  def handle_call({:add_task, title}, _from, state) do
+  # Explicit handlers for known operations - use handle_call_impl
+  defp handle_call_impl({:add_task, title}, _from, state) do
     task = %{id: state.next_id, title: title, done: false}
     new_state = %{
       state |
@@ -196,7 +198,7 @@ defmodule MyApp.TaskManager do
   end
 
   # Let LLM handle natural language queries
-  def handle_call(_msg, _from, _state) do
+  defp handle_call_impl(_msg, _from, _state) do
     :escalate_to_llm
   end
 end
@@ -298,13 +300,13 @@ defmodule MyApp.SmartActor do
     }
   end
 
-  # Start with minimal handlers
-  def handle_call(:known_op, _from, state) do
+  # Start with minimal handlers - use handle_call_impl
+  defp handle_call_impl(:known_op, _from, state) do
     {:reply, :ok, state}
   end
 
   # Unknown operations escalate to LLM
-  def handle_call(_msg, _from, _state), do: :escalate_to_llm
+  defp handle_call_impl(_msg, _from, _state), do: :escalate_to_llm
 end
 
 # After enough escalations, the actor will:

@@ -5,8 +5,11 @@ defmodule AiActors.AiActorTest do
   alias AiActors.Examples.TaskManagerActor
 
   setup do
-    # Ensure required services are running
-    start_supervised!(AiActors.CodeModifier)
+    # Ensure required services are running - may already be started by application
+    case Process.whereis(AiActors.CodeModifier) do
+      nil -> start_supervised!(AiActors.CodeModifier)
+      _pid -> :ok
+    end
     :ok
   end
 

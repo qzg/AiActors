@@ -11,8 +11,8 @@ defmodule AiActors.Examples.CounterActor do
 
   use AiActors.AiActor
 
-  @impl AiActors.AiActor
-  def init(initial_value \\ 0) do
+  # Initialize user state - don't override init, override init_impl
+  defp init_impl(initial_value \\ 0) do
     {:ok, %{counter: initial_value, history: []}}
   end
 
@@ -33,12 +33,12 @@ defmodule AiActors.Examples.CounterActor do
     }
   end
 
-  # Explicit handlers
+  # Explicit handlers - use handle_call_impl to work with framework
 
   @doc """
   Increment the counter.
   """
-  def handle_call({:increment, amount}, _from, state) when is_number(amount) do
+  defp handle_call_impl({:increment, amount}, _from, state) when is_number(amount) do
     new_value = state.counter + amount
 
     new_history =
@@ -59,7 +59,7 @@ defmodule AiActors.Examples.CounterActor do
   @doc """
   Decrement the counter.
   """
-  def handle_call({:decrement, amount}, _from, state) when is_number(amount) do
+  defp handle_call_impl({:decrement, amount}, _from, state) when is_number(amount) do
     new_value = state.counter - amount
 
     new_history =
@@ -80,27 +80,27 @@ defmodule AiActors.Examples.CounterActor do
   @doc """
   Get the current counter value.
   """
-  def handle_call(:get_value, _from, state) do
+  defp handle_call_impl(:get_value, _from, state) do
     {:reply, state.counter, state}
   end
 
   @doc """
   Get the full history of operations.
   """
-  def handle_call(:get_history, _from, state) do
+  defp handle_call_impl(:get_history, _from, state) do
     {:reply, state.history, state}
   end
 
   # All other messages will be escalated to LLM via :escalate_to_llm
-  def handle_call(_msg, _from, _state) do
+  defp handle_call_impl(_msg, _from, _state) do
     :escalate_to_llm
   end
 
-  def handle_cast(_msg, _state) do
+  defp handle_cast_impl(_msg, _state) do
     :escalate_to_llm
   end
 
-  def handle_info(_msg, state) do
+  defp handle_info_impl(_msg, state) do
     {:noreply, state}
   end
 end
