@@ -1,0 +1,343 @@
+# WARP.md
+
+This file provides guidance to WARP (warp.dev) when working with code in this repository.
+
+## Project Overview
+
+AiActors is an experimental Elixir framework that extends OTP GenServers with Large Language Model (LLM) capabilities. The framework enables actors to intelligently handle unknown messages, self-modify their code, and learn from interactions over time.
+
+**Core Innovation**: Combines Elixir's battle-tested OTP patterns with LLM intelligence to create actors that can fall back to AI reasoning when explicit handlers don't exist.
+
+## Essential Commands
+
+### Setup
+```bash
+# Install dependencies
+mix deps.get
+
+# Compile the project
+mix compile
+```
+
+### Testing
+```bash
+# Run all tests
+mix test
+
+# Run specific test file
+mix test test/ai_actors/ai_actor_test.exs
+
+# Run with coverage (if configured)
+MIX_ENV=test mix test --cover
+
+# Run tests with specific tags
+mix test --only integration
+```
+
+### Code Quality
+```bash
+# Format code
+mix format
+
+# Check code formatting
+mix format --check-formatted
+
+# Run static analysis with Credo
+mix credo
+
+# Run Dialyzer for type checking
+mix dialyzer
+```
+
+### Development
+```bash
+# Start interactive shell with project loaded
+iex -S mix
+
+# Compile and watch for changes (if using mix_test.watch)
+mix test.watch
+
+# Generate documentation
+mix docs
+```
+
+## Environment Requirements
+
+**Critical**: Set the Anthropic API key before running any actors:
+```bash
+export ANTHROPIC_API_KEY="your-api-key-here"
+```
+
+Without this, all LLM interactions will fail.
+
+## Architecture Overview
+
+### Three-Layer Design
+
+1. **OTP Foundation** - Standard GenServer patterns for state management and supervision
+2. **AiActor Enhancement** - Wraps GenServer with AI capabilities via macro injection
+3. **Infrastructure Services** - LLMClient, CodeModifier, EscalationTracker, and SelfLearning modules
+
+### Key Components
+
+- **`AiActors.AiActor`** (`lib/ai_actors/ai_actor.ex`)
+  - Macro that wraps GenServer to add AI capabilities
+  - Handles message escalation via returning `:escalate_to_llm` from handle_call/cast
+  - Maintains both user state and AI infrastructure state transparently
+  - Provides `ask_llm/3`, `request_code_modification/2`, and learning methods
+
+- **`AiActors.LLMClient`** (`lib/ai_actors/llm_client.ex`)
+  - Claude API integration using Anthropic's API
+  - Handles tool/function calling with automatic loop until completion
+  - Default model: `claude-sonnet-4-5-20250929`
+  - Supports structured output via prompt caching
+
+- **`AiActors.CodeModifier`** (`lib/ai_actors/code_modifier.ex`)
+  - Performs hot code reloading of actor modules
+  - Safety features: syntax validation, automatic backups, compilation verification
+  - Asynchronous modification with notification via message passing
+  - Backup directory created in project root
+
+- **`AiActors.EscalationTracker`** (`lib/ai_actors/escalation_tracker.ex`)
+  - Logs all LLM escalations and handler executions
+  - Tracks execution times for performance analysis
+  - Provides pattern analysis for self-learning recommendations
+  - In-memory storage (last 10,000 entries per type)
+
+- **`AiActors.SelfLearning`** (`lib/ai_actors/self_learning.ex`)
+  - Periodic pattern analysis to identify common LLM escalations
+  - Generates deterministic handlers for repeated patterns
+  - Uses CodeModifier to implement new handlers automatically
+  - Validation workflow to ensure new handlers work correctly
+
+### Message Flow Patterns
+
+**Explicit Handler (Fast Path)**:
+1. Message sent via GenServer.call/cast
+2. Pattern matches explicit handler in module
+3. Handler executes deterministically (~microseconds)
+4. No LLM cost or latency
+
+**LLM Escalation (Intelligent Fallback)**:
+1. Message sent via GenServer.call/cast
+2. No explicit handler matches, returns `:escalate_to_llm`
+3. Framework builds context: state, metadata, tools, conversation history
+4. LLMClient sends request to Claude API (~1-5 seconds)
+5. If tool use required, executes tools and continues loop
+6. Final response returned to caller
+7. Escalation logged to EscalationTracker
+
+**Self-Learning Cycle**:
+1. Actor configured with `enable_self_learning?: true`
+2. All escalations logged with message patterns and responses
+3. Periodic review (default: every 24 hours) analyzes patterns
+4. Common patterns (threshold: 3+ occurrences) trigger handler generation
+5. LLM generates deterministic Elixir handler code
+6. CodeModifier validates, compiles, and hot-reloads new code
+7. Future messages matching pattern use fast deterministic path
+
+## Development Patterns
+
+### Creating a New AiActor
+
+```elixir
+defmodule MyApp.MyActor do
+  use AiActors.AiActor
+
+  @impl AiActors.AiActor
+  def init(args) do
+    state = %{
+      # Your state here
+    }
+    {:ok, state}
+  end
+
+  @impl AiActors.AiActor
+  def development_metadata do
+    %{
+      purpose: "Clear description of what this actor does",
+      design_decisions: [
+        "Why certain choices were made",
+        "Trade-offs considered"
+      ],
+      dependencies: ["OtherService", "AnotherActor"],
+      version: "1.0.0"
+    }
+  end
+
+  # Explicit handlers for known operations
+  def handle_call({:known_operation, arg}, _from, state) do
+    # Fast, deterministic handling
+    {:reply, result, new_state}
+  end
+
+  # Unknown messages escalate to LLM
+  def handle_call(_unknown, _from, _state) do
+    :escalate_to_llm
+  end
+end
+```
+
+### Adding Custom Tools for LLM
+
+Tools define actions the LLM can take:
+
+```elixir
+@impl AiActors.AiActor
+def available_tools do
+  AiActors.AiActor.default_tools() ++ [
+    %{
+      name: "custom_action",
+      description: "What this action does",
+      input_schema: %{
+        type: "object",
+        properties: %{
+          param: %{type: "string", description: "Parameter description"}
+        },
+        required: ["param"]
+      }
+    }
+  ]
+end
+
+@impl AiActors.AiActor
+def execute_tool("custom_action", %{"param" => value}, state) do
+  # Perform the action
+  result = do_something(value, state)
+  new_state = update_state(state)
+  {:ok, result, new_state}
+end
+```
+
+### Enabling Self-Learning
+
+```elixir
+@impl AiActors.AiActor
+def enable_self_learning?, do: true
+
+@impl AiActors.AiActor
+def self_learning_config do
+  %{
+    review_interval_hours: 24,          # How often to analyze patterns
+    min_escalations_for_analysis: 10,  # Minimum data before analysis
+    pattern_threshold: 3,               # Times pattern must occur to trigger handler
+    validation_window_hours: 48        # How long to validate new handlers
+  }
+end
+```
+
+## Testing Strategy
+
+### Unit Tests (No LLM)
+Test explicit handlers and logic without LLM calls:
+```elixir
+test "explicit handler works" do
+  {:ok, pid} = MyActor.start_link([])
+  assert {:ok, result} = GenServer.call(pid, {:known_operation, arg})
+end
+```
+
+### Integration Tests (Mocked LLM)
+Mock LLMClient responses to test escalation flow without API costs.
+
+### E2E Tests (Real LLM)
+Use `@tag :integration` for tests that call real Claude API - run sparingly due to cost and latency.
+
+## Configuration
+
+Located in `config/config.exs` and environment-specific files:
+
+```elixir
+config :ai_actors,
+  llm_model: "claude-sonnet-4-5-20250929",  # Claude model to use
+  max_tokens: 4096,                          # Max response length
+  temperature: 1.0,                          # Sampling temperature
+  enable_code_modification: true,            # Allow hot code reloading
+  backup_retention_days: 30                  # Keep backups for 30 days
+```
+
+## Important Constraints
+
+### State Management
+- **User state** is what you work with in handlers (transparent)
+- **AI state** is managed by framework (llm_messages, metadata, tools, etc.)
+- Never directly manipulate AI state - use provided callbacks and methods
+
+### Code Modification Safety
+- All modifications go through validation: syntax check → backup → compile → load
+- Backups stored with timestamp in backup directory
+- Compilation errors prevent code from being loaded (rollback to previous version)
+- Always test code modifications in development before production
+
+### LLM Considerations
+- **Cost**: Each escalation costs money (tokens used)
+- **Latency**: LLM calls take 1-5 seconds vs microseconds for explicit handlers
+- **Rate Limits**: Anthropic API has rate limits - design for graceful degradation
+- **Best Practice**: Use explicit handlers for known patterns, LLM for truly unknown/complex cases
+
+### Tool Execution
+- Tools must have valid JSON schemas
+- All inputs validated against schema
+- Tool execution is synchronous within LLM loop
+- Long-running tools can block message handling - consider async patterns
+- Tools can modify actor state (return new_state in tuple)
+
+## Examples
+
+See `lib/ai_actors/examples/` for complete working examples:
+- **`counter_actor.ex`** - Simple counter with history and LLM queries
+- **`task_manager_actor.ex`** - Task management with custom tools
+- **`learning_counter_actor.ex`** - Self-learning counter that adds handlers over time
+
+## Debugging
+
+### Check Escalation History
+```elixir
+# In iex -S mix
+escalations = AiActors.EscalationTracker.get_escalations(MyActor)
+IO.inspect(escalations)
+```
+
+### View Learning Statistics
+```elixir
+{:ok, pid} = MyActor.start_link([])
+stats = MyActor.get_learning_stats(pid)
+# Returns: %{escalation_rate: 0.25, avg_response_time_ms: 50, handler_success_rate: 0.98}
+```
+
+### Trigger Manual Review
+```elixir
+MyActor.trigger_review(pid)  # Force self-learning analysis
+```
+
+### Check Metadata
+```elixir
+metadata = MyActor.get_metadata(pid)
+```
+
+## Common Pitfalls
+
+1. **Forgetting ANTHROPIC_API_KEY** - All LLM calls will fail silently or with errors
+2. **Returning wrong tuple from handlers** - Must return proper GenServer response tuples
+3. **Not providing development_metadata** - LLM won't have context about actor purpose
+4. **Blocking tool execution** - Long-running tools block the actor process
+5. **Over-relying on LLM** - Identify common patterns early and add explicit handlers
+6. **Ignoring escalation logs** - Review EscalationTracker data to find optimization opportunities
+
+## Related Documentation
+
+- **Architecture Deep Dive**: `docs/ARCHITECTURE.md` - Detailed component design and rationale
+- **Self-Learning Guide**: `docs/SELF_LEARNING.md` - Complete guide to actor learning capabilities
+- **Examples**: `docs/EXAMPLES.md` - Additional usage examples and patterns
+- **README**: `README.md` - High-level overview and quick start
+
+## Development Philosophy
+
+The framework follows these principles:
+
+1. **Explicit over Implicit** - Known operations use explicit handlers, not LLM
+2. **LLM as Fallback** - AI handles truly unknown or complex scenarios
+3. **Self-Documenting** - Metadata is first-class, helps LLM understand context
+4. **Safe Self-Modification** - Multiple checks prevent dangerous code changes
+5. **Tool-Based Interaction** - No arbitrary code execution, only validated tools
+6. **Progressive Enhancement** - Actors become faster/cheaper over time via learning
