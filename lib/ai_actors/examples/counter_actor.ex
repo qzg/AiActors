@@ -12,7 +12,8 @@ defmodule AiActors.Examples.CounterActor do
   use AiActors.AiActor
 
   # Initialize user state - don't override init, override init_impl
-  defp init_impl(initial_value \\ 0) do
+  # Default value is handled by the caller - start_link(0) or start_link(initial_value)
+  defp init_impl(initial_value) do
     {:ok, %{counter: initial_value, history: []}}
   end
 
@@ -35,9 +36,7 @@ defmodule AiActors.Examples.CounterActor do
 
   # Explicit handlers - use handle_call_impl to work with framework
 
-  @doc """
-  Increment the counter.
-  """
+  # Increment the counter
   defp handle_call_impl({:increment, amount}, _from, state) when is_number(amount) do
     new_value = state.counter + amount
 
@@ -56,9 +55,7 @@ defmodule AiActors.Examples.CounterActor do
     {:reply, new_value, new_state}
   end
 
-  @doc """
-  Decrement the counter.
-  """
+  # Decrement the counter
   defp handle_call_impl({:decrement, amount}, _from, state) when is_number(amount) do
     new_value = state.counter - amount
 
@@ -77,16 +74,12 @@ defmodule AiActors.Examples.CounterActor do
     {:reply, new_value, new_state}
   end
 
-  @doc """
-  Get the current counter value.
-  """
+  # Get the current counter value
   defp handle_call_impl(:get_value, _from, state) do
     {:reply, state.counter, state}
   end
 
-  @doc """
-  Get the full history of operations.
-  """
+  # Get the full history of operations
   defp handle_call_impl(:get_history, _from, state) do
     {:reply, state.history, state}
   end

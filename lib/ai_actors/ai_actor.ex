@@ -63,11 +63,8 @@ defmodule AiActors.AiActor do
           pending_modifications: map()
         }
 
-  @doc """
-  Invoked when the AiActor is started.
-  Similar to GenServer.init/1 but with AiActor extensions.
-  """
-  @callback init(args :: term()) :: {:ok, state :: term()} | {:stop, reason :: term()}
+  # Note: init/1 is not a callback here because GenServer already defines it.
+  # Users should implement init_impl/1 (private) to initialize their state.
 
   @doc """
   Defines the development metadata for this actor.
@@ -181,7 +178,7 @@ defmodule AiActors.AiActor do
 
       # Internal GenServer implementation with AiActor extensions
 
-      @doc false
+      @impl GenServer
       def init(args) do
         case init_impl(args) do
           {:ok, user_state} ->
@@ -220,12 +217,12 @@ defmodule AiActors.AiActor do
 
       # Users MUST define init_impl/1 to initialize their state
 
-      @doc false
+      @impl GenServer
       def handle_call({:__ai_actor_ask_llm__, prompt, context}, from, state) do
         AiActors.AiActor.handle_llm_request(prompt, context, state, __MODULE__, from)
       end
 
-      @doc false
+      @impl GenServer
       def handle_call({:__ai_actor_modify_code__, modification_request}, _from, state) do
         AiActors.AiActor.handle_code_modification_request(
           modification_request,
@@ -234,18 +231,18 @@ defmodule AiActors.AiActor do
         )
       end
 
-      @doc false
+      @impl GenServer
       def handle_call(:__ai_actor_get_metadata__, _from, state) do
         {:reply, state.development_metadata, state}
       end
 
-      @doc false
+      @impl GenServer
       def handle_call(:__ai_actor_trigger_review__, _from, state) do
         result = AiActors.SelfLearning.perform_review(__MODULE__)
         {:reply, result, state}
       end
 
-      @doc false
+      @impl GenServer
       def handle_call(:__ai_actor_learning_stats__, _from, state) do
         stats = AiActors.EscalationTracker.get_statistics(__MODULE__)
         report = AiActors.SelfLearning.generate_report(__MODULE__)
@@ -253,7 +250,7 @@ defmodule AiActors.AiActor do
       end
 
       # Intercept handle_call to provide LLM escalation
-      @doc false
+      @impl GenServer
       def handle_call(msg, from, state) do
         case handle_call_impl(msg, from, state.user_state) do
           {:reply, reply, new_user_state} ->
@@ -279,7 +276,7 @@ defmodule AiActors.AiActor do
 
       # Users must define handle_call_impl/3 - no default provided
 
-      @doc false
+      @impl GenServer
       def handle_cast(msg, state) do
         case handle_cast_impl(msg, state.user_state) do
           {:noreply, new_user_state} ->
@@ -298,7 +295,7 @@ defmodule AiActors.AiActor do
 
       # Users must define handle_cast_impl/2 - no default provided
 
-      @doc false
+      @impl GenServer
       def handle_info({:code_modification_result, ref, result}, state) do
         case Map.get(state.pending_modifications, ref) do
           nil ->
@@ -330,7 +327,7 @@ defmodule AiActors.AiActor do
         end
       end
 
-      @doc false
+      @impl GenServer
       def handle_info({:self_learning_review, actor_module}, state) do
         # Perform periodic self-learning review
         Logger.info("Performing scheduled self-learning review for #{inspect(actor_module)}")
@@ -353,7 +350,7 @@ defmodule AiActors.AiActor do
         end
       end
 
-      @doc false
+      @impl GenServer
       def handle_info(msg, state) do
         case handle_info_impl(msg, state.user_state) do
           {:noreply, new_user_state} ->
@@ -535,7 +532,7 @@ defmodule AiActors.AiActor do
     {:ok, state.development_metadata, state}
   end
 
-  def execute_default_tool(tool_name, _input, state, _module) do
+  def execute_default_tool(tool_name, _input, _state, _module) do
     {:error, {:unknown_tool, tool_name}}
   end
 
@@ -668,9 +665,19 @@ defmodule AiActors.AiActor do
                     execution_time
                   )
 
+                  # Execute shadow handlers if registered (fire-and-forget)
+                  pattern = normalize_message_pattern(message)
+                  AiActors.ShadowRunner.execute_shadow(
+                    module,
+                    pattern,
+                    message,
+                    {:ok, parsed},
+                    state.user_state
+                  )
+
                   {:ok, parsed}
 
-                error ->
+                _error ->
                   # Log failed escalation
                   AiActors.EscalationTracker.log_escalation(
                     module,
@@ -744,4 +751,33 @@ defmodule AiActors.AiActor do
       nil -> text
     end
   end
+
+  @doc """
+  Normalize a message to a pattern for shadow handler matching.
+  
+  Converts concrete values to wildcards (`:_`) to enable pattern matching
+  across different inputs of the same "shape".
+  
+  Examples:
+    {:multiply, 5}       -> {:multiply, :_number}
+    {:get_user, "alice"} -> {:get_user, :_string}
+    {:add, 1, 2}         -> {:add, :_number, :_number}
+  """
+  def normalize_message_pattern(message) when is_tuple(message) do
+    list = Tuple.to_list(message)
+    normalized = Enum.map(list, &normalize_value/1)
+    List.to_tuple(normalized)
+  end
+
+  def normalize_message_pattern(message) when is_atom(message), do: message
+  def normalize_message_pattern(message), do: normalize_value(message)
+
+  defp normalize_value(value) when is_atom(value), do: value
+  defp normalize_value(value) when is_integer(value), do: :_number
+  defp normalize_value(value) when is_float(value), do: :_number
+  defp normalize_value(value) when is_binary(value), do: :_string
+  defp normalize_value(value) when is_list(value), do: :_list
+  defp normalize_value(value) when is_map(value), do: :_map
+  defp normalize_value(value) when is_tuple(value), do: normalize_message_pattern(value)
+  defp normalize_value(_value), do: :_any
 end

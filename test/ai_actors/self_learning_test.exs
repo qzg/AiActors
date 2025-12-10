@@ -5,11 +5,18 @@ defmodule AiActors.SelfLearningTest do
   alias AiActors.EscalationTracker
 
   setup do
-    # Ensure services are started
-    start_supervised!(AiActors.CodeModifier)
-    start_supervised!(EscalationTracker)
+    # Ensure services are started (handle case where application already started them)
+    ensure_started(AiActors.CodeModifier)
+    ensure_started(EscalationTracker)
 
     :ok
+  end
+
+  defp ensure_started(module) do
+    case Process.whereis(module) do
+      nil -> start_supervised!(module)
+      _pid -> :ok
+    end
   end
 
   describe "start_learning/2" do
@@ -99,7 +106,7 @@ defmodule AiActors.SelfLearningTest do
 
   describe "implement_recommendations/2" do
     test "handles empty recommendations" do
-      analysis = %{recommendations: []}
+      analysis = %{recommendations: [], patterns: []}
 
       {:ok, implementations} = SelfLearning.implement_recommendations(TestModule, analysis)
 

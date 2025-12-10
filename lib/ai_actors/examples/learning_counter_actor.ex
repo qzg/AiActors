@@ -32,8 +32,9 @@ defmodule AiActors.Examples.LearningCounterActor do
 
   use AiActors.AiActor
 
-  # Initialize user state - don't override init, override init_impl  
-  defp init_impl(initial_value \\ 0) do
+  # Initialize user state - don't override init, override init_impl
+  # Default value is handled by the caller - start_link(0) or start_link(initial_value)
+  defp init_impl(initial_value) do
     {:ok, %{counter: initial_value, operations: []}}
   end
 

@@ -63,12 +63,19 @@ mix docs
 
 ## Environment Requirements
 
-**Critical**: Set the Anthropic API key before running any actors:
+**LLM Provider API Keys**:
 ```bash
+# Required for Claude (Anthropic) - primary LLM
 export ANTHROPIC_API_KEY="your-api-key-here"
+
+# Optional: For accelerated inference via OpenRouter (Cerebras, SambaNova)
+export OPENROUTER_API_KEY="your-openrouter-key"
+
+# Optional: For local models via Ollama (Granite, Llama)
+# Just ensure ollama is running: `ollama serve`
 ```
 
-Without this, all LLM interactions will fail.
+Without ANTHROPIC_API_KEY, all LLM interactions will fail.
 
 ## Architecture Overview
 
@@ -87,11 +94,29 @@ Without this, all LLM interactions will fail.
   - Provides `ask_llm/3`, `request_code_modification/2`, and learning methods
 
 - **`AiActors.LLMClient`** (`lib/ai_actors/llm_client.ex`)
-  - Claude API integration using Anthropic's API
+  - Multi-provider LLM integration (Anthropic, OpenRouter, Ollama)
   - Handles tool/function calling with automatic loop until completion
-  - Default model: `claude-sonnet-4-5-20250929`
+  - Default provider: Anthropic (Claude Sonnet)
+  - Auto-detects provider from model alias
   - Uses Claude's native structured outputs API (beta) for guaranteed JSON schema compliance
-  - Beta header: `structured-outputs-2025-11-13`
+
+- **`AiActors.LLMProvider`** (`lib/ai_actors/llm_provider.ex`)
+  - Provider abstraction behaviour for LLM backends
+  - Built-in providers:
+    - `Anthropic` - Claude Sonnet/Haiku/Opus via direct API
+    - `OpenRouter` - Cerebras, SambaNova, Groq for accelerated inference
+    - `Ollama` - Local models like Granite, Llama for zero-cost inference
+
+- **`AiActors.ShadowRunner`** (`lib/ai_actors/shadow_runner.ex`)
+  - Manages shadow handler execution for safe optimization validation
+  - Runs candidate handlers in parallel with primary (crash-isolated)
+  - Compares results and tracks statistics in ETS
+  - Handles promotion when criteria are met
+
+- **`AiActors.OptimizationEvaluator`** (`lib/ai_actors/optimization_evaluator.ex`)
+  - Analyzes escalation patterns to determine optimal handling tier
+  - Four optimization tiers: Deterministic → Local LLM → Accelerated → Full
+  - Tests simpler models against historical examples before recommending
 
 - **`AiActors.CodeModifier`** (`lib/ai_actors/code_modifier.ex`)
   - Performs hot code reloading of actor modules
@@ -107,9 +132,9 @@ Without this, all LLM interactions will fail.
 
 - **`AiActors.SelfLearning`** (`lib/ai_actors/self_learning.ex`)
   - Periodic pattern analysis to identify common LLM escalations
-  - Generates deterministic handlers for repeated patterns
-  - Uses CodeModifier to implement new handlers automatically
-  - Validation workflow to ensure new handlers work correctly
+  - Integrates with OptimizationEvaluator for multi-tier recommendations
+  - Registers shadow handlers for safe validation before promotion
+  - Uses CodeModifier to implement promoted handlers automatically
 
 ### Message Flow Patterns
 
@@ -128,14 +153,25 @@ Without this, all LLM interactions will fail.
 6. Final response returned to caller
 7. Escalation logged to EscalationTracker
 
-**Self-Learning Cycle**:
+**Self-Learning Cycle (with Shadow Mode)**:
 1. Actor configured with `enable_self_learning?: true`
-2. All escalations logged with message patterns and responses
+2. All escalations logged with normalized message patterns
 3. Periodic review (default: every 24 hours) analyzes patterns
-4. Common patterns (threshold: 3+ occurrences) trigger handler generation
-5. LLM generates deterministic Elixir handler code
-6. CodeModifier validates, compiles, and hot-reloads new code
-7. Future messages matching pattern use fast deterministic path
+4. OptimizationEvaluator determines optimal tier for each pattern:
+   - **Deterministic** - Identical responses → compile to code
+   - **Local LLM** - Simple patterns → use Granite/Ollama (~0 cost)
+   - **Accelerated LLM** - Moderate complexity → use Cerebras/OpenRouter
+   - **Full LLM** - Complex reasoning → keep using Claude Sonnet
+5. Shadow handlers registered to run in parallel with primary
+6. Shadow results compared against primary in production traffic
+7. After meeting criteria (50+ executions, 98% match, 24h), shadow promoted
+8. CodeModifier validates, compiles, and hot-reloads promoted handler
+
+**Shadow Mode Benefits**:
+- **Crash Isolation** - Shadow handlers run under separate supervisor
+- **Safe Validation** - Real traffic validates handlers before promotion
+- **Automatic Rollback** - Poor-performing shadows are discarded
+- **Gradual Optimization** - Progressive cost reduction over time
 
 ## Development Patterns
 
@@ -278,11 +314,36 @@ Located in `config/config.exs` and environment-specific files:
 
 ```elixir
 config :ai_actors,
-  llm_model: "claude-sonnet-4-5-20250929",  # Claude model to use
   max_tokens: 4096,                          # Max response length
   temperature: 1.0,                          # Sampling temperature
   enable_code_modification: true,            # Allow hot code reloading
   backup_retention_days: 30                  # Keep backups for 30 days
+
+# Multi-provider LLM configuration
+config :ai_actors, :llm_providers,
+  anthropic: [
+    api_key: {:system, "ANTHROPIC_API_KEY"},
+    # Available models: :sonnet, :haiku, :opus
+  ],
+  openrouter: [
+    api_key: {:system, "OPENROUTER_API_KEY"},
+    # Available models: :cerebras_llama70b, :sambanova_llama405b, :groq_llama70b
+  ],
+  ollama: [
+    base_url: "http://192.168.9.129:11434",
+    models: [
+      granite_micro: "granite4:small-h",
+      granite_small: "granite4:small-h"
+    ]
+  ]
+
+# Shadow mode configuration
+config :ai_actors, :shadow_config,
+  min_shadow_executions: 50,       # Minimum executions before promotion
+  min_match_rate: 0.98,            # 98% match rate required
+  max_crash_rate: 0.01,            # Max 1% crash rate allowed
+  min_shadow_duration_hours: 24,   # Must run for at least 24 hours
+  shadow_timeout_ms: 5000          # Timeout for shadow handler execution
 ```
 
 ## Important Constraints

@@ -124,7 +124,7 @@ defmodule AiActors.AiActorTest do
       {:ok, pid} = TaskManagerActor.start_link([])
 
       {:ok, task1} = TaskManagerActor.create_task(pid, "Task 1")
-      {:ok, task2} = TaskManagerActor.create_task(pid, "Task 2")
+      {:ok, _task2} = TaskManagerActor.create_task(pid, "Task 2")
       {:ok, _task3} = TaskManagerActor.create_task(pid, "Task 3")
 
       TaskManagerActor.complete_task(pid, task1.id)

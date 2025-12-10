@@ -1,22 +1,31 @@
 defmodule AiActors.SelfLearning do
   @moduledoc """
-  Self-learning capabilities for AiActors.
+  Self-learning capabilities for AiActors with multi-tier optimization.
 
   This module provides:
   - Periodic pattern analysis
+  - Multi-tier optimization evaluation (deterministic → local LLM → accelerated → full)
+  - Shadow mode validation before promotion
   - Handler generation and implementation
-  - Handler validation
   - Performance monitoring
   - Automatic code improvement
 
+  ## Optimization Tiers
+
+  1. **Deterministic** - Algorithmically computable responses (~0 cost, microseconds)
+  2. **Local LLM** - Simple reasoning via Granite/Ollama (~0 cost, <100ms)
+  3. **Accelerated LLM** - Moderate complexity via Cerebras/SambaNova (fast, moderate cost)
+  4. **Full LLM** - Complex reasoning via Claude Sonnet (full cost)
+
   ## Workflow
 
-  1. **Track**: All LLM escalations and handler executions are logged
+  1. **Track**: All LLM escalations are logged with patterns normalized
   2. **Analyze**: Periodically analyze logs to find common patterns
-  3. **Generate**: Create deterministic handlers for common patterns
-  4. **Implement**: Use CodeModifier to add new handlers
-  5. **Validate**: Monitor new handlers to ensure correctness
-  6. **Iterate**: Continue learning from new data
+  3. **Evaluate**: Use OptimizationEvaluator to determine optimal tier
+  4. **Shadow**: Register shadow handlers that run in parallel with primary
+  5. **Validate**: Compare shadow results against primary in production
+  6. **Promote**: After meeting criteria, promote shadow to primary handler
+  7. **Iterate**: Continue learning from new data
 
   ## Configuration
 
@@ -39,6 +48,8 @@ defmodule AiActors.SelfLearning do
   """
 
   require Logger
+
+  alias AiActors.{EscalationTracker, OptimizationEvaluator, ShadowRunner}
 
   @type learning_config :: %{
           review_interval_hours: pos_integer(),
@@ -72,18 +83,25 @@ defmodule AiActors.SelfLearning do
 
   @doc """
   Perform a self-learning review for an actor.
+
+  This now uses the multi-tier optimization system:
+  1. Analyzes escalation patterns
+  2. Evaluates each pattern for optimization tier
+  3. Registers shadow handlers for validated optimizations
+  4. Checks existing shadows for promotion readiness
   """
   @spec perform_review(module()) :: {:ok, map()} | {:error, term()}
   def perform_review(actor_module) do
     Logger.info("Performing self-learning review for #{inspect(actor_module)}")
 
-    with {:ok, analysis} <- AiActors.EscalationTracker.analyze_patterns(actor_module),
-         {:ok, implementations} <- implement_recommendations(actor_module, analysis),
-         :ok <- schedule_validation(actor_module, implementations) do
+    with {:ok, analysis} <- EscalationTracker.analyze_patterns(actor_module),
+         {:ok, shadow_registrations} <- evaluate_and_register_shadows(actor_module, analysis),
+         {:ok, promotions} <- check_promotions(actor_module) do
       {:ok,
        %{
          analysis: analysis,
-         implementations: implementations,
+         shadow_registrations: shadow_registrations,
+         promotions: promotions,
          status: :review_complete
        }}
     else
@@ -94,59 +112,181 @@ defmodule AiActors.SelfLearning do
   end
 
   @doc """
-  Implement recommended handlers for an actor.
+  Evaluate patterns and register shadow handlers for promising optimizations.
+  """
+  @spec evaluate_and_register_shadows(module(), map()) :: {:ok, list(map())} | {:error, term()}
+  def evaluate_and_register_shadows(actor_module, analysis) do
+    config = get_learning_config(actor_module)
+    
+    # Get escalation patterns that meet threshold
+    patterns = analysis.patterns || []
+    
+    eligible_patterns = Enum.filter(patterns, fn p ->
+      p.count >= config.pattern_threshold
+    end)
+
+    if length(eligible_patterns) == 0 do
+      Logger.info("No patterns meet threshold for #{inspect(actor_module)}")
+      {:ok, []}
+    else
+      Logger.info("Evaluating #{length(eligible_patterns)} patterns for #{inspect(actor_module)}")
+
+      registrations = Enum.flat_map(eligible_patterns, fn pattern_info ->
+        # Get escalation history for this pattern
+        escalations = EscalationTracker.get_escalations(actor_module)
+        |> Enum.filter(fn e ->
+          normalized = AiActors.AiActor.normalize_message_pattern(e.message)
+          normalized == pattern_info.pattern
+        end)
+
+        # Skip if already has shadow
+        if ShadowRunner.has_shadow?(actor_module, pattern_info.pattern) do
+          Logger.debug("Shadow already exists for #{inspect(pattern_info.pattern)}")
+          []
+        else
+          # Evaluate for optimization
+          case OptimizationEvaluator.evaluate_pattern(actor_module, pattern_info.pattern, escalations) do
+            {:deterministic, code} ->
+              register_deterministic_shadow(actor_module, pattern_info.pattern, code)
+
+            {:local_llm, prompt_template, model} ->
+              register_llm_shadow(actor_module, pattern_info.pattern, :local_llm, prompt_template, :ollama, model)
+
+            {:accelerated_llm, prompt_template, model} ->
+              register_llm_shadow(actor_module, pattern_info.pattern, :accelerated_llm, prompt_template, :openrouter, model)
+
+            :keep_current ->
+              Logger.debug("Pattern #{inspect(pattern_info.pattern)} should keep using full LLM")
+              []
+          end
+        end
+      end)
+
+      {:ok, registrations}
+    end
+  end
+
+  @doc """
+  Check existing shadows for promotion eligibility.
+  """
+  @spec check_promotions(module()) :: {:ok, list(map())} | {:error, term()}
+  def check_promotions(actor_module) do
+    shadows = ShadowRunner.list_shadows()
+    |> Enum.filter(fn {module, _pattern, _spec} -> module == actor_module end)
+
+    promotions = Enum.flat_map(shadows, fn {module, pattern, _spec} ->
+      case ShadowRunner.get_shadow_stats(module, pattern) do
+        {:ok, stats} ->
+          if should_promote?(stats) do
+            case ShadowRunner.promote_shadow(module, pattern) do
+              {:ok, ref} ->
+                Logger.info("Promoted shadow for #{inspect(module)}/#{inspect(pattern)}")
+                [%{module: module, pattern: pattern, promotion_ref: ref, stats: stats}]
+
+              {:error, reason} ->
+                Logger.warning("Failed to promote shadow: #{inspect(reason)}")
+                maybe_discard_shadow(module, pattern, stats, reason)
+            end
+          else
+            Logger.debug("Shadow #{inspect(pattern)} not ready for promotion: #{inspect(stats)}")
+            []
+          end
+
+        {:error, :not_found} ->
+          []
+      end
+    end)
+
+    {:ok, promotions}
+  end
+
+  # Register a deterministic shadow handler
+  defp register_deterministic_shadow(actor_module, pattern, code) do
+    handler_spec = %{
+      type: :deterministic,
+      code: code,
+      prompt_template: nil,
+      provider: nil,
+      model: nil,
+      created_at: DateTime.utc_now(),
+      pattern_description: inspect(pattern)
+    }
+
+    case ShadowRunner.register_shadow(actor_module, pattern, handler_spec) do
+      :ok ->
+        Logger.info("Registered deterministic shadow for #{inspect(pattern)}")
+        [%{pattern: pattern, type: :deterministic, status: :registered}]
+
+      {:error, reason} ->
+        Logger.warning("Failed to register shadow: #{inspect(reason)}")
+        []
+    end
+  end
+
+  # Register an LLM-based shadow handler
+  defp register_llm_shadow(actor_module, pattern, type, prompt_template, provider, model) do
+    handler_spec = %{
+      type: type,
+      code: nil,
+      prompt_template: prompt_template,
+      provider: provider,
+      model: model,
+      created_at: DateTime.utc_now(),
+      pattern_description: inspect(pattern)
+    }
+
+    case ShadowRunner.register_shadow(actor_module, pattern, handler_spec) do
+      :ok ->
+        Logger.info("Registered #{type} shadow for #{inspect(pattern)} using #{provider}/#{model}")
+        [%{pattern: pattern, type: type, provider: provider, model: model, status: :registered}]
+
+      {:error, reason} ->
+        Logger.warning("Failed to register shadow: #{inspect(reason)}")
+        []
+    end
+  end
+
+  defp should_promote?(stats) do
+    config = ShadowRunner.get_config()
+
+    stats.executions >= config.min_shadow_executions and
+      stats.match_rate >= config.min_match_rate and
+      stats.crash_rate <= config.max_crash_rate and
+      sufficient_shadow_duration?(stats, config)
+  end
+
+  defp sufficient_shadow_duration?(stats, config) do
+    case stats.first_execution_at do
+      nil -> false
+      first ->
+        hours_elapsed = DateTime.diff(DateTime.utc_now(), first, :hour)
+        hours_elapsed >= config.min_shadow_duration_hours
+    end
+  end
+
+  defp maybe_discard_shadow(module, pattern, stats, _reason) do
+    # Discard shadow if it has high crash rate or too many mismatches
+    config = ShadowRunner.get_config()
+
+    should_discard = 
+      stats.crash_rate > config.max_crash_rate * 2 or
+      stats.match_rate < config.min_match_rate * 0.5
+
+    if should_discard do
+      Logger.warning("Discarding shadow #{inspect(pattern)} due to poor performance")
+      ShadowRunner.discard_shadow(module, pattern)
+    end
+
+    []
+  end
+
+  @doc """
+  Implement recommended handlers for an actor (legacy function - now uses shadow system).
   """
   @spec implement_recommendations(module(), map()) :: {:ok, list(map())} | {:error, term()}
   def implement_recommendations(actor_module, analysis) do
-    recommendations = analysis.recommendations || []
-
-    if length(recommendations) == 0 do
-      Logger.info("No recommendations to implement for #{inspect(actor_module)}")
-      {:ok, []}
-    else
-      Logger.info("Implementing #{length(recommendations)} recommendations for #{inspect(actor_module)}")
-
-      # Get current module source
-      case AiActors.CodeModifier.get_module_source(actor_module) do
-        {:ok, current_code} ->
-          # Generate new code with additional handlers
-          case generate_enhanced_code(actor_module, current_code, recommendations) do
-            {:ok, new_code} ->
-              # Request code modification
-              case AiActors.CodeModifier.modify_code(
-                     actor_module,
-                     new_code,
-                     %{
-                       reason: "Self-learning: Adding deterministic handlers",
-                       patterns: Enum.map(recommendations, & &1["pattern"]),
-                       timestamp: DateTime.utc_now()
-                     }
-                   ) do
-                {:ok, ref} ->
-                  implementations =
-                    Enum.map(recommendations, fn rec ->
-                      %{
-                        pattern: rec["pattern"],
-                        modification_ref: ref,
-                        implemented_at: DateTime.utc_now(),
-                        validation_status: :pending
-                      }
-                    end)
-
-                  {:ok, implementations}
-
-                error ->
-                  error
-              end
-
-            error ->
-              error
-          end
-
-        error ->
-          error
-      end
-    end
+    # Delegate to shadow-based implementation
+    evaluate_and_register_shadows(actor_module, analysis)
   end
 
   @doc """
@@ -154,7 +294,7 @@ defmodule AiActors.SelfLearning do
   """
   @spec generate_enhanced_code(module(), String.t(), list(map())) ::
           {:ok, String.t()} | {:error, term()}
-  def generate_enhanced_code(actor_module, current_code, recommendations) do
+  def generate_enhanced_code(_actor_module, current_code, recommendations) do
     prompt = """
     You are enhancing an Elixir AiActor module with new deterministic handlers.
 

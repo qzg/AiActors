@@ -92,8 +92,10 @@ defmodule AiActors.CodeModifierTest do
 
     test "invalid code structure" do
       code = """
-      defmodule MyModule
-        def broken
+      defmodule MyModule do
+        def broken do
+          {
+      end
       """
 
       assert {:error, _} = Code.string_to_quoted(code)

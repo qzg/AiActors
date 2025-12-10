@@ -14,6 +14,10 @@ defmodule AiActors.Application do
       AiActors.CodeModifier,
       AiActors.EscalationTracker,
 
+      # Shadow mode infrastructure
+      {Task.Supervisor, name: AiActors.ShadowSupervisor},
+      AiActors.ShadowRunner,
+
       # Dynamic supervisor for AiActors
       {DynamicSupervisor, strategy: :one_for_one, name: AiActors.ActorSupervisor}
     ]

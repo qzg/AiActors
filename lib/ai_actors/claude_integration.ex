@@ -302,8 +302,8 @@ defmodule AiActors.ClaudeIntegration do
   def phase2_implementation(design, spec) do
     Logger.info("Phase 2: Implementing component #{spec.name}")
 
-    # Build the implementation prompt
-    prompt =
+    # Build the implementation prompt (unused for now, but available for subagent integration)
+    _prompt =
       EEx.eval_string(@implementation_prompt,
         design_doc: design.design_doc,
         file_path: design.file_path,
@@ -320,7 +320,7 @@ defmodule AiActors.ClaudeIntegration do
     3. Write files to disk
     4. Return success/failure
 
-    For now, returning the prompt as notes.
+    For now, returning the design notes.
     """)
 
     {:ok,

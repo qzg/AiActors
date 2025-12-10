@@ -1,19 +1,36 @@
 defmodule AiActors.LLMClient do
 @moduledoc """
-  Client for interacting with Claude API (Anthropic).
+  Unified client for interacting with LLM providers.
 
-  Handles:
-  - Message sending with structured output support (using Claude's native structured outputs)
+  Supports multiple providers:
+  - **Anthropic (Claude)** - Direct API for Claude Sonnet, Haiku, Opus
+  - **OpenRouter** - Access to Cerebras, SambaNova, and other accelerated providers
+  - **Ollama** - Local models like IBM Granite
+
+  ## Provider Selection
+
+  The provider can be specified explicitly or auto-detected from the model:
+
+      # Explicit provider
+      LLMClient.send_message(messages, provider: :anthropic, model: :sonnet)
+      LLMClient.send_message(messages, provider: :ollama, model: :granite_micro)
+
+      # Auto-detect provider from model
+      LLMClient.send_message(messages, model: :cerebras_llama70b)  # Uses OpenRouter
+
+  ## Features
+
+  - Message sending with structured output support
   - Tool/function calling
-  - Streaming responses (optional)
+  - Multi-provider abstraction
+  - Automatic response normalization
   """
 
   require Logger
 
-  @api_base "https://api.anthropic.com/v1"
-  @default_model "claude-sonnet-4-5-20250929"
-  @api_version "2023-06-01"
-  @structured_outputs_beta "structured-outputs-2025-11-13"
+  alias AiActors.LLMProvider
+
+@default_provider :anthropic
 
   @type message :: %{
           role: String.t(),
@@ -29,64 +46,47 @@ defmodule AiActors.LLMClient do
   @type response :: {:ok, map()} | {:error, term()}
 
   @doc """
-  Send a message to Claude with optional tools and system prompt.
+  Send a message to an LLM provider.
 
   ## Options
-  - `:model` - Model to use (default: #{@default_model})
+  - `:provider` - Provider to use (:anthropic, :openrouter, :ollama). Auto-detected if model is specified.
+  - `:model` - Model to use (provider-specific alias or string)
   - `:max_tokens` - Maximum tokens in response (default: 4096)
   - `:temperature` - Sampling temperature (default: 1.0)
-  - `:tools` - List of available tools
+  - `:tools` - List of available tools (Anthropic only currently)
   - `:system` - System prompt
-  - `:structured_output` - JSON schema for structured output (uses Claude's native structured outputs API)
+  - `:structured_output` - JSON schema for structured output
   """
   @spec send_message(list(message()), keyword()) :: response()
   def send_message(messages, opts \\ []) do
-    api_key = get_api_key()
+    case resolve_provider(opts) do
+      {:ok, provider_name, provider_module} ->
+        log_level = System.get_env("LOG_LEVEL", "info")
+        if log_level == "debug" do
+          model = Keyword.get(opts, :model, provider_module.default_model())
+          Logger.debug("LLMClient: Using provider #{provider_name}, model #{inspect(model)}")
+        end
 
-    unless api_key do
-      raise "ANTHROPIC_API_KEY environment variable not set"
-    end
-
-    body = build_request_body(messages, opts)
-    use_structured_outputs = Keyword.has_key?(opts, :structured_output)
-
-    headers = build_headers(api_key, use_structured_outputs)
-
-    case Req.post("#{@api_base}/messages", json: body, headers: headers) do
-      {:ok, %{status: 200, body: response_body}} ->
-        {:ok, response_body}
-
-      {:ok, %{status: status, body: body}} ->
-        Logger.error("LLM API error: #{status} - #{inspect(body)}")
-        {:error, {:api_error, status, body}}
-
-      {:error, reason} ->
-        Logger.error("LLM request failed: #{inspect(reason)}")
-        {:error, reason}
-    end
-  end
-
-  defp build_headers(api_key, use_structured_outputs) do
-    base_headers = [
-      {"x-api-key", api_key},
-      {"anthropic-version", @api_version},
-      {"content-type", "application/json"}
-    ]
-
-    if use_structured_outputs do
-      [{"anthropic-beta", @structured_outputs_beta} | base_headers]
-    else
-      base_headers
+        provider_module.send_message(messages, opts)
+        
+      {:error, _reason} = error ->
+        error
     end
   end
 
   @doc """
   Send a message and handle tool calls in a loop until a final response is received.
+  
+  Note: Tool calling is currently only fully supported with Anthropic provider.
   """
   @spec send_message_with_tools(list(message()), list(tool()), keyword(), function()) ::
           response()
   def send_message_with_tools(messages, tools, opts \\ [], tool_executor) do
-    opts = Keyword.put(opts, :tools, tools)
+    # Tool calling works best with Anthropic
+    opts = opts
+    |> Keyword.put(:tools, tools)
+    |> Keyword.put_new(:provider, :anthropic)
+    
     do_tool_loop(messages, opts, tool_executor)
   end
 
@@ -138,78 +138,47 @@ defmodule AiActors.LLMClient do
     end)
   end
 
-  defp build_request_body(messages, opts) do
-    body = %{
-      model: Keyword.get(opts, :model, @default_model),
-      max_tokens: Keyword.get(opts, :max_tokens, 4096),
-      temperature: Keyword.get(opts, :temperature, 1.0),
-      messages: messages
-    }
-
-    body =
-      if system = Keyword.get(opts, :system) do
-        Map.put(body, :system, system)
-      else
-        body
-      end
-
-    body =
-      if tools = Keyword.get(opts, :tools) do
-        Map.put(body, :tools, tools)
-      else
-        body
-      end
-
-    body =
-      if structured_schema = Keyword.get(opts, :structured_output) do
-        # Use Claude's native structured outputs API
-        # This guarantees schema-compliant JSON through constrained decoding
-        output_format = %{
-          type: "json_schema",
-          schema: transform_schema(structured_schema)
-        }
-
-        Map.put(body, :output_format, output_format)
-      else
-        body
-      end
-
-    body
+  # Resolve which provider to use based on options.
+  # Returns {:ok, provider_name, provider_module} or {:error, reason}
+  @spec resolve_provider(keyword()) :: {:ok, atom(), module()} | {:error, term()}
+  defp resolve_provider(opts) do
+    # If provider is explicitly specified, use it
+    case Keyword.get(opts, :provider) do
+      nil ->
+        # Try to auto-detect from model
+        case Keyword.get(opts, :model) do
+          nil ->
+            # Use default - always returns a valid module
+            {:ok, @default_provider, LLMProvider.Anthropic}
+          
+          model when is_atom(model) ->
+            # Try to find provider for this model alias
+            case LLMProvider.find_provider_for_model(model) do
+              nil -> 
+                # Model not found in any provider, use default
+                {:ok, @default_provider, LLMProvider.Anthropic}
+              provider_name -> 
+                resolve_known_provider(provider_name)
+            end
+          
+          _model_string ->
+            # Model string, use default provider
+            {:ok, @default_provider, LLMProvider.Anthropic}
+        end
+      
+      provider_name when is_atom(provider_name) ->
+        resolve_known_provider(provider_name)
+    end
   end
-
-  # Transform schema to ensure it meets Claude's structured output requirements
-  defp transform_schema(schema) do
-    schema
-    |> ensure_additional_properties_false()
-  end
-
-  # Add additionalProperties: false to all object types for strict validation
-  defp ensure_additional_properties_false(schema) when is_map(schema) do
-    schema = 
-      if Map.get(schema, :type) == "object" or Map.get(schema, "type") == "object" do
-        Map.put(schema, :additionalProperties, false)
-      else
-        schema
-      end
-
-    # Recursively process nested schemas
-    Enum.reduce(schema, %{}, fn
-      {:properties, props}, acc when is_map(props) ->
-        Map.put(acc, :properties, Map.new(props, fn {k, v} -> {k, ensure_additional_properties_false(v)} end))
-      {"properties", props}, acc when is_map(props) ->
-        Map.put(acc, "properties", Map.new(props, fn {k, v} -> {k, ensure_additional_properties_false(v)} end))
-      {:items, items}, acc when is_map(items) ->
-        Map.put(acc, :items, ensure_additional_properties_false(items))
-      {"items", items}, acc when is_map(items) ->
-        Map.put(acc, "items", ensure_additional_properties_false(items))
-      {k, v}, acc ->
-        Map.put(acc, k, v)
-    end)
-  end
-  defp ensure_additional_properties_false(value), do: value
-
-  defp get_api_key do
-    System.get_env("ANTHROPIC_API_KEY")
+  
+  # Resolve a known provider name to its module
+  defp resolve_known_provider(provider_name) do
+    case provider_name do
+      :anthropic -> {:ok, :anthropic, LLMProvider.Anthropic}
+      :openrouter -> {:ok, :openrouter, LLMProvider.OpenRouter}
+      :ollama -> {:ok, :ollama, LLMProvider.Ollama}
+      _ -> {:error, {:unknown_provider, provider_name}}
+    end
   end
 
   @doc """

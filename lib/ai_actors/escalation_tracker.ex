@@ -292,6 +292,7 @@ defmodule AiActors.EscalationTracker do
          actor_module: actor_module,
          analyzed_at: DateTime.utc_now(),
          patterns_found: [],
+         patterns: [],
          recommendations: [],
          message: "Not enough escalations to analyze (need at least 5)"
        }}
@@ -327,9 +328,10 @@ defmodule AiActors.EscalationTracker do
          actor_module: actor_module,
          analyzed_at: DateTime.utc_now(),
          patterns_found: frequent_patterns,
+         patterns: Enum.map(frequent_patterns, fn p -> %{pattern: p.pattern, count: p.occurrences} end),
          recommendations: recommendations,
          total_escalations: length(escalations),
-         total_patterns: length(grouped)
+         total_patterns: map_size(grouped)
        }}
     end
   end
